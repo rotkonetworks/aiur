@@ -322,8 +322,10 @@ pub extern "C" fn call() {
     let s_get_pylon_metrics = sel("getPylonMetrics(address)");
     let s_report_probe_data = sel("reportProbeData(address,bytes32,uint8)");
     let s_finalize_window = sel("finalizeWindow(address,uint32)");
+    let s_bootstrap = sel("bootstrap()");
 
     match selector {
+        x if x == s_bootstrap => bootstrap(),
         x if x == s_create_network => create_network(),
         x if x == s_set_network_dns => set_network_dns(),
         x if x == s_add_pylon => add_pylon(),
@@ -348,6 +350,21 @@ pub extern "C" fn call() {
         x if x == s_finalize_window => finalize_window(),
         _ => api::return_value(ReturnFlags::REVERT, &[]),
     }
+}
+
+/// one-time bootstrap to set deployer as templar
+fn bootstrap() {
+    let mut caller = [0u8; 20];
+    api::caller(&mut caller);
+    
+    let mut level = [0u8; 1];
+    sget(&pylon_level_key(&caller), &mut level);
+    if level[0] != 0 {
+        api::return_value(ReturnFlags::REVERT, b"already bootstrapped");
+    }
+    
+    sset(&pylon_level_key(&caller), &[5u8]);
+    api::return_value(ReturnFlags::empty(), &[]);
 }
 
 /// creates a new network; caller must be level 5+; caller becomes initial pylon of that network
