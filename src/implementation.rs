@@ -1,6 +1,7 @@
 #![feature(alloc_error_handler)]
 #![no_main]
 #![no_std]
+#![allow(static_mut_refs)]
 
 use uapi::{HostFn, HostFnImpl as api, ReturnFlags, StorageFlags};
 
@@ -12,7 +13,7 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
     }
 }
 
-// minimal bump allocator on a static buffer (for `alloc`)
+// minimal bump allocator for `alloc`
 mod alloc_support {
     use core::{
         alloc::{GlobalAlloc, Layout},
@@ -23,7 +24,7 @@ mod alloc_support {
         offset: AtomicUsize,
     }
 
-    const HEAP_SIZE: usize = 64 * 1024; // 64 KiB static heap; fine for now.
+    const HEAP_SIZE: usize = 64 * 1024;
 
     #[link_section = ".bss.heap"]
     static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
@@ -44,7 +45,10 @@ mod alloc_support {
                     Ordering::SeqCst,
                     Ordering::Relaxed,
                 ) {
-                    Ok(_) => return unsafe { HEAP.as_mut_ptr().add(aligned) },
+                    Ok(_) => {
+                        let heap_ptr = HEAP.as_ptr() as *mut u8;
+                        return heap_ptr.add(aligned);
+                    },
                     Err(o) => offset = o,
                 }
             }
@@ -64,13 +68,12 @@ mod alloc_support {
     }
 }
 
-// tiny adapters for new uapi storage signatures 
+// tiny adapters for storage apis
 #[inline(always)]
 fn sset(key: &[u8], value: &[u8]) {
     // ignore returned size of previous value
     let _ = api::set_storage(StorageFlags::empty(), key, value);
 }
-
 #[inline(always)]
 fn sget(key: &[u8], out: &mut [u8]) {
     // leave `out` zeroed if the key is missing or shorter than `out`
@@ -78,30 +81,50 @@ fn sget(key: &[u8], out: &mut [u8]) {
     let _ = api::get_storage(StorageFlags::empty(), key, &mut slice);
 }
 
-// storage key prefixes
-const PYLON_LEVEL_PREFIX: u8 = 1;
-const NETWORK_COUNT_KEY: [u8; 32] = [2u8; 32];
-const NETWORK_PREFIX: u8 = 3;
-const PYLON_PREFIX: u8 = 4;
-const DNS_PREFIX: u8 = 5;
-const ORG_PREFIX: u8 = 6;
-const PYLON_ORG_PREFIX: u8 = 7;
-const DNS_CONTROLLER_PREFIX: u8 = 8;
-const PROPOSAL_PREFIX: u8 = 9;
-const PROPOSAL_COUNT_KEY: [u8; 32] = [10u8; 32];
-const VOTE_PREFIX: u8 = 11;
-const VOTE_WEIGHT_PREFIX: u8 = 12;
-const PROBE_WINDOW_PREFIX: u8 = 13;
-const PROBE_REPORT_PREFIX: u8 = 14;
-const PYLON_STATUS_PREFIX: u8 = 15;
-const PROPOSAL_DATA_PREFIX: u8 = 16;
-const PROBE_WHITELIST_PREFIX: u8 = 17;
-const PYLON_METRICS_PREFIX: u8 = 18;
+// ---- selectors ----
+
+#[inline(always)]
+fn sel(signature: &str) -> [u8; 4] {
+    let mut h = [0u8; 32];
+    api::hash_keccak_256(signature.as_bytes(), &mut h);
+    [h[0], h[1], h[2], h[3]]
+}
+
+// ---- storage layout ----
+
+// shared with controller: same prefix for pylon levels
+const PYLON_LEVEL_PREFIX: u8 = 0x10;
+
+// implementation-only keys and prefixes
+const NETWORK_COUNT_KEY: [u8; 32] = [0x20; 32];
+const PROPOSAL_COUNT_KEY: [u8; 32] = [0x21; 32];
+
+const NETWORK_PREFIX: u8 = 0x30;
+const PYLON_PREFIX: u8 = 0x31;
+const DNS_PREFIX: u8 = 0x32;
+const ORG_PREFIX: u8 = 0x33;
+const PYLON_ORG_PREFIX: u8 = 0x34;
+const DNS_CONTROLLER_PREFIX: u8 = 0x35;
+const PROPOSAL_PREFIX: u8 = 0x36;
+const VOTE_PREFIX: u8 = 0x37;
+const VOTE_WEIGHT_PREFIX: u8 = 0x38;
+const PROBE_WINDOW_PREFIX: u8 = 0x39;
+const PROBE_REPORT_PREFIX: u8 = 0x3A;
+const PYLON_STATUS_PREFIX: u8 = 0x3B;
+const PROPOSAL_DATA_PREFIX: u8 = 0x3C;
+const PROBE_WHITELIST_PREFIX: u8 = 0x3D;
+const PYLON_METRICS_PREFIX: u8 = 0x3E;
+const WINDOW_FINALIZED_PREFIX: u8 = 0x3F;
+const PROPOSAL_EXECUTED_PREFIX: u8 = 0x40;
+
+// monitoring constants
 const REPORT_INTERVAL: u64 = 300;
 const DEGRADATION_THRESHOLD: u8 = 95;
 const MIN_PROBES_FOR_CONSENSUS: u8 = 3;
 
-// storage key generators
+// ---- key helpers ----
+
+#[inline(always)]
 fn pylon_level_key(pylon: &[u8; 20]) -> [u8; 32] {
     let mut key = [0u8; 32];
     key[0] = PYLON_LEVEL_PREFIX;
@@ -109,6 +132,7 @@ fn pylon_level_key(pylon: &[u8; 20]) -> [u8; 32] {
     key
 }
 
+#[inline(always)]
 fn network_key(id: u32) -> [u8; 32] {
     let mut key = [0u8; 32];
     key[0] = NETWORK_PREFIX;
@@ -116,6 +140,7 @@ fn network_key(id: u32) -> [u8; 32] {
     key
 }
 
+#[inline(always)]
 fn pylon_key(network_id: u32, pylon: &[u8; 20]) -> [u8; 32] {
     let mut key = [0u8; 32];
     key[0] = PYLON_PREFIX;
@@ -124,6 +149,7 @@ fn pylon_key(network_id: u32, pylon: &[u8; 20]) -> [u8; 32] {
     key
 }
 
+#[inline(always)]
 fn dns_key(network_id: u32, org_id: u8) -> [u8; 32] {
     let mut key = [0u8; 32];
     key[0] = DNS_PREFIX;
@@ -132,6 +158,7 @@ fn dns_key(network_id: u32, org_id: u8) -> [u8; 32] {
     key
 }
 
+#[inline(always)]
 fn org_key(org_id: u8) -> [u8; 32] {
     let mut key = [0u8; 32];
     key[0] = ORG_PREFIX;
@@ -139,6 +166,7 @@ fn org_key(org_id: u8) -> [u8; 32] {
     key
 }
 
+#[inline(always)]
 fn pylon_org_key(pylon: &[u8; 20]) -> [u8; 32] {
     let mut key = [0u8; 32];
     key[0] = PYLON_ORG_PREFIX;
@@ -146,6 +174,7 @@ fn pylon_org_key(pylon: &[u8; 20]) -> [u8; 32] {
     key
 }
 
+#[inline(always)]
 fn dns_controller_key(org_id: u8) -> [u8; 32] {
     let mut key = [0u8; 32];
     key[0] = DNS_CONTROLLER_PREFIX;
@@ -153,6 +182,7 @@ fn dns_controller_key(org_id: u8) -> [u8; 32] {
     key
 }
 
+#[inline(always)]
 fn proposal_key(id: u32) -> [u8; 32] {
     let mut key = [0u8; 32];
     key[0] = PROPOSAL_PREFIX;
@@ -160,6 +190,15 @@ fn proposal_key(id: u32) -> [u8; 32] {
     key
 }
 
+#[inline(always)]
+fn proposal_executed_key(id: u32) -> [u8; 32] {
+    let mut k = [0u8; 32];
+    k[0] = PROPOSAL_EXECUTED_PREFIX;
+    k[1..5].copy_from_slice(&id.to_le_bytes());
+    k
+}
+
+#[inline(always)]
 fn proposal_data_key(id: u32) -> [u8; 32] {
     let mut key = [0u8; 32];
     key[0] = PROPOSAL_DATA_PREFIX;
@@ -167,6 +206,7 @@ fn proposal_data_key(id: u32) -> [u8; 32] {
     key
 }
 
+#[inline(always)]
 fn vote_key(proposal_id: u32, voter: &[u8; 20]) -> [u8; 32] {
     let mut key = [0u8; 32];
     key[0] = VOTE_PREFIX;
@@ -175,6 +215,7 @@ fn vote_key(proposal_id: u32, voter: &[u8; 20]) -> [u8; 32] {
     key
 }
 
+#[inline(always)]
 fn vote_weight_key(proposal_id: u32, support: bool) -> [u8; 32] {
     let mut key = [0u8; 32];
     key[0] = VOTE_WEIGHT_PREFIX;
@@ -183,6 +224,7 @@ fn vote_weight_key(proposal_id: u32, support: bool) -> [u8; 32] {
     key
 }
 
+#[inline(always)]
 fn probe_window_key(pylon: &[u8; 20], window: u32) -> [u8; 32] {
     let mut key = [0u8; 32];
     key[0] = PROBE_WINDOW_PREFIX;
@@ -191,41 +233,38 @@ fn probe_window_key(pylon: &[u8; 20], window: u32) -> [u8; 32] {
     key
 }
 
+#[inline(always)]
+fn window_finalized_key(pylon: &[u8; 20], window: u32) -> [u8; 32] {
+    let mut k = [0u8; 32];
+    k[0] = WINDOW_FINALIZED_PREFIX;
+    k[1..21].copy_from_slice(pylon);
+    k[21..25].copy_from_slice(&window.to_le_bytes());
+    k
+}
+
+/// collision-proof report key: keccak(pylon || window || probe)
+#[inline(always)]
 fn probe_report_key(pylon: &[u8; 20], window: u32, probe: &[u8; 20]) -> [u8; 32] {
+    let mut buf = [0u8; 44];
+    buf[0..20].copy_from_slice(pylon);
+    buf[20..24].copy_from_slice(&window.to_le_bytes());
+    buf[24..44].copy_from_slice(probe);
+
+    let mut h = [0u8; 32];
+    api::hash_keccak_256(&buf, &mut h);
+
     let mut key = [0u8; 32];
     key[0] = PROBE_REPORT_PREFIX;
-    key[1..21].copy_from_slice(pylon);
-    key[21..25].copy_from_slice(&window.to_le_bytes());
-    key[25..27].copy_from_slice(&probe[0..2]);
-    key
-}
-
-fn pylon_status_key(pylon: &[u8; 20]) -> [u8; 32] {
-    let mut key = [0u8; 32];
-    key[0] = PYLON_STATUS_PREFIX;
-    key[1..21].copy_from_slice(pylon);
-    key
-}
-
-fn probe_whitelist_key(probe: &[u8; 20]) -> [u8; 32] {
-    let mut key = [0u8; 32];
-    key[0] = PROBE_WHITELIST_PREFIX;
-    key[1..21].copy_from_slice(probe);
-    key
-}
-
-fn pylon_metrics_key(pylon: &[u8; 20]) -> [u8; 32] {
-    let mut key = [0u8; 32];
-    key[0] = PYLON_METRICS_PREFIX;
-    key[1..21].copy_from_slice(pylon);
+    key[1..32].copy_from_slice(&h[..31]);
     key
 }
 
 #[no_mangle]
 #[polkavm_derive::polkavm_export]
 pub extern "C" fn deploy() {
+    // sets initial org labels and zeroes counters
     sset(&org_key(1), b"IBP");
-    sset(&org_key(2), b"Dotters");
+    sset(&org_key(2), b"dotters");
     sset(&NETWORK_COUNT_KEY, &0u32.to_le_bytes());
     sset(&PROPOSAL_COUNT_KEY, &0u32.to_le_bytes());
 }
@@ -236,45 +275,66 @@ pub extern "C" fn call() {
     let mut selector = [0u8; 4];
     api::call_data_copy(&mut selector, 0);
 
-    match u32::from_be_bytes(selector) {
-        0xd09de08a => create_network(),
-        0xec7dbaa5 => set_network_dns(),
-        0x42c9a3f3 => add_pylon(),
-        0xb2d1b31f => remove_pylon(),
-        0xb9b0f66f => set_pylon_org(),
-        0xfcdae25a => set_pylon_level(),
-        0x1f9840a8 => execute_set_pylon_level(),
-        0xae169a50 => execute_set_pylon_org(),
-        0x73cf575a => set_dns_controller(),
-        0xa8c62e76 => get_dns_controller(),
-        0xb2bdda30 => execute_set_dns_controller(),
-        0x3af32abf => whitelist_probe(),
-        0xc19d93fb => revoke_probe(),
-        0x9a8a0592 => execute_whitelist_probe(),
-        0xd892cd12 => execute_revoke_probe(),
-        0xda35a26f => propose(),
-        0x15373e3d => vote(),
-        0xece40cc1 => execute_proposal(),
-        0xc5958af9 => get_network_info(),
-        0x957888b7 => get_network_count(),
-        0x013cf08b => get_proposal(),
-        0x609ff1bd => get_pylon_level(),
-        0xa776d498 => get_pylon_status(),
-        0x7a9e5e4b => get_pylon_metrics(),
-        0x2e46b05d => is_probe_whitelisted(),
-        0x8f32d59b => report_probe_data(),
-        0x4e487b71 => finalize_window(),
+    // compute all selectors we support (runtime-keccak)
+    let s_create_network = sel("createNetwork()");
+    let s_set_network_dns = sel("setNetworkDns(uint32,uint8,bool)");
+    let s_add_pylon = sel("addPylon(uint32,address)");
+    let s_remove_pylon = sel("removePylon(uint32,address)");
+    let s_set_pylon_org = sel("setPylonOrg(address,uint8)");
+    let s_set_pylon_level = sel("setPylonLevel(address,uint8)");
+    let s_set_dns_controller = sel("setDnsController(uint8,address)");
+    let s_get_dns_controller = sel("getDnsController(uint8)");
+    let s_whitelist_probe = sel("whitelistProbe(address)");
+    let s_revoke_probe = sel("revokeProbe(address)");
+    let s_is_probe_whitelisted = sel("isProbeWhitelisted(address)");
+    let s_propose = sel("propose(uint8)");
+    let s_vote = sel("vote(uint32,bool)");
+    let s_execute_proposal = sel("executeProposal(uint32)");
+    let s_get_network_info = sel("getNetworkInfo(uint32)");
+    let s_get_network_count = sel("getNetworkCount()");
+    let s_get_proposal = sel("getProposal(uint32)");
+    let s_get_pylon_level = sel("getPylonLevel(address)");
+    let s_get_pylon_status = sel("getPylonStatus(address)");
+    let s_get_pylon_metrics = sel("getPylonMetrics(address)");
+    let s_report_probe_data = sel("reportProbeData(address,uint32,uint16,uint8)");
+    let s_finalize_window = sel("finalizeWindow(address,uint32)");
+
+    match selector {
+        x if x == s_create_network => create_network(),
+        x if x == s_set_network_dns => set_network_dns(),
+        x if x == s_add_pylon => add_pylon(),
+        x if x == s_remove_pylon => remove_pylon(),
+        x if x == s_set_pylon_org => set_pylon_org(),
+        x if x == s_set_pylon_level => set_pylon_level(),
+        x if x == s_set_dns_controller => set_dns_controller(),
+        x if x == s_get_dns_controller => get_dns_controller(),
+        x if x == s_whitelist_probe => whitelist_probe(),
+        x if x == s_revoke_probe => revoke_probe(),
+        x if x == s_is_probe_whitelisted => is_probe_whitelisted(),
+        x if x == s_propose => propose(), // will revert to enforce typed proposes
+        x if x == s_vote => vote(),
+        x if x == s_execute_proposal => execute_proposal(),
+        x if x == s_get_network_info => get_network_info(),
+        x if x == s_get_network_count => get_network_count(),
+        x if x == s_get_proposal => get_proposal(),
+        x if x == s_get_pylon_level => get_pylon_level(),
+        x if x == s_get_pylon_status => get_pylon_status(),
+        x if x == s_get_pylon_metrics => get_pylon_metrics(),
+        x if x == s_report_probe_data => report_probe_data(),
+        x if x == s_finalize_window => finalize_window(),
         _ => api::return_value(ReturnFlags::REVERT, &[]),
     }
 }
 
+/// creates a new network; caller must be level 5+; caller becomes initial pylon of that network
+///
+/// returns: `uint32 network_id`
 fn create_network() {
     let mut caller = [0u8; 20];
     api::caller(&mut caller);
 
     let mut level = [0u8; 1];
     sget(&pylon_level_key(&caller), &mut level);
-
     if level[0] < 5 {
         api::return_value(ReturnFlags::REVERT, b"need level 5+");
     }
@@ -282,29 +342,36 @@ fn create_network() {
     let mut count_bytes = [0u8; 4];
     sget(&NETWORK_COUNT_KEY, &mut count_bytes);
     let mut count = u32::from_le_bytes(count_bytes);
+    count = count.saturating_add(1);
 
-    count += 1;
     let network_id = count;
-
     sset(&NETWORK_COUNT_KEY, &count.to_le_bytes());
     sset(&network_key(network_id), &level);
-    sset(&pylon_key(network_id, &caller), &[1u8]);
+    sset(&pylon_key(network_id, &caller), &[1u8]); // mark as member
 
-    let mut output = [0u8; 32];
-    output[28..32].copy_from_slice(&network_id.to_be_bytes());
-    api::return_value(ReturnFlags::empty(), &output);
+    let mut out = [0u8; 32];
+    out[28..32].copy_from_slice(&network_id.to_be_bytes());
+    api::return_value(ReturnFlags::empty(), &out);
 }
 
+/// sets dns enable flag for an org on a given network; controller or level 5+ pylon is required
 fn set_network_dns() {
-    let mut input = [0u8; 96];
+    let mut input = [0u8; 96]; // selector-skipped args (3 slots)
     api::call_data_copy(&mut input, 4);
 
     let network_id = u32::from_be_bytes([input[28], input[29], input[30], input[31]]);
     let org_id = input[63];
     let enabled = input[95] != 0;
 
-    if org_id != 1 && org_id != 2 {
+    if !(org_id == 1 || org_id == 2) {
         api::return_value(ReturnFlags::REVERT, b"invalid org");
+    }
+
+    // ensure network exists
+    let mut level_req = [0u8; 1];
+    sget(&network_key(network_id), &mut level_req);
+    if level_req[0] == 0 {
+        api::return_value(ReturnFlags::REVERT, b"network not found");
     }
 
     let mut caller = [0u8; 20];
@@ -327,13 +394,21 @@ fn set_network_dns() {
     api::return_value(ReturnFlags::empty(), &[]);
 }
 
+/// adds a pylon to a network; caller must be a level 5+ pylon of that network; validates network existence
 fn add_pylon() {
-    let mut input = [0u8; 64];
+    let mut input = [0u8; 64]; // 2 slots
     api::call_data_copy(&mut input, 4);
 
     let network_id = u32::from_be_bytes([input[28], input[29], input[30], input[31]]);
     let mut new_pylon = [0u8; 20];
-    new_pylon.copy_from_slice(&input[44..64]);
+    new_pylon.copy_from_slice(&input[44..64]); // address is last 20 bytes of slot #1
+
+    // ensure network exists
+    let mut net_data = [0u8; 1];
+    sget(&network_key(network_id), &mut net_data);
+    if net_data[0] == 0 {
+        api::return_value(ReturnFlags::REVERT, b"network not found");
+    }
 
     let mut caller = [0u8; 20];
     api::caller(&mut caller);
@@ -349,31 +424,38 @@ fn add_pylon() {
     }
 
     sset(&pylon_key(network_id, &new_pylon), &[1u8]);
-    sset(&pylon_status_key(&new_pylon), &[0u8]);
+    sset(&pylon_status_key(&new_pylon), &[0u8]); // default as healthy
     api::return_value(ReturnFlags::empty(), &[]);
 }
 
+/// removing a pylon must be done via governance
 fn remove_pylon() {
     api::return_value(ReturnFlags::REVERT, b"use governance");
 }
 
+/// creates a proposal to set a pylon's org; only level 5+ may propose
+///
+/// returns: `uint32 proposal_id`
 fn set_pylon_org() {
-    let mut input = [0u8; 64];
+    let mut input = [0u8; 64]; // 2 slots (address, uint8)
     api::call_data_copy(&mut input, 4);
 
     let mut pylon = [0u8; 20];
     pylon.copy_from_slice(&input[12..32]);
     let org_id = input[63];
 
-    if org_id != 1 && org_id != 2 {
+    if !(org_id == 1 || org_id == 2) {
         api::return_value(ReturnFlags::REVERT, b"invalid org");
     }
 
     create_proposal(2, &pylon, org_id);
 }
 
+/// creates a proposal to set a pylon's level; only level 5+ may propose
+///
+/// returns: `uint32 proposal_id`
 fn set_pylon_level() {
-    let mut input = [0u8; 64];
+    let mut input = [0u8; 64]; // 2 slots (address, uint8)
     api::call_data_copy(&mut input, 4);
 
     let mut pylon = [0u8; 20];
@@ -387,21 +469,27 @@ fn set_pylon_level() {
     create_proposal(1, &pylon, new_level);
 }
 
+/// creates a proposal to set dns controller for an org
+///
+/// returns: `uint32 proposal_id`
 fn set_dns_controller() {
-    let mut input = [0u8; 64];
+    let mut input = [0u8; 64]; // 2 slots (uint8, address)
     api::call_data_copy(&mut input, 4);
 
     let org_id = input[31];
     let mut controller = [0u8; 20];
     controller.copy_from_slice(&input[44..64]);
 
-    if org_id != 1 && org_id != 2 {
+    if !(org_id == 1 || org_id == 2) {
         api::return_value(ReturnFlags::REVERT, b"invalid org");
     }
 
     create_proposal(3, &controller, org_id);
 }
 
+/// creates a proposal to whitelist a probe
+///
+/// returns: `uint32 proposal_id`
 fn whitelist_probe() {
     let mut input = [0u8; 32];
     api::call_data_copy(&mut input, 4);
@@ -412,6 +500,9 @@ fn whitelist_probe() {
     create_proposal(4, &probe, 1);
 }
 
+/// creates a proposal to revoke a probe
+///
+/// returns: `uint32 proposal_id`
 fn revoke_probe() {
     let mut input = [0u8; 32];
     api::call_data_copy(&mut input, 4);
@@ -422,13 +513,13 @@ fn revoke_probe() {
     create_proposal(5, &probe, 0);
 }
 
+/// creates a governance proposal (internal helper)
 fn create_proposal(proposal_type: u8, target: &[u8; 20], value: u8) {
     let mut caller = [0u8; 20];
     api::caller(&mut caller);
 
     let mut level = [0u8; 1];
     sget(&pylon_level_key(&caller), &mut level);
-
     if level[0] < 5 {
         api::return_value(ReturnFlags::REVERT, b"need level 5+");
     }
@@ -436,42 +527,37 @@ fn create_proposal(proposal_type: u8, target: &[u8; 20], value: u8) {
     let mut count_bytes = [0u8; 4];
     sget(&PROPOSAL_COUNT_KEY, &mut count_bytes);
     let mut count = u32::from_le_bytes(count_bytes);
-    count += 1;
+    count = count.saturating_add(1);
 
-    let mut proposal_meta = [0u8; 32];
-    proposal_meta[0] = proposal_type;
-    proposal_meta[1..21].copy_from_slice(&caller);
-    sset(&proposal_key(count), &proposal_meta);
+    // meta: [0]=type, [1..21]=proposer, [31] unused
+    let mut meta = [0u8; 32];
+    meta[0] = proposal_type;
+    meta[1..21].copy_from_slice(&caller);
+    sset(&proposal_key(count), &meta);
 
-    let mut proposal_data = [0u8; 32];
-    proposal_data[0..20].copy_from_slice(target);
-    proposal_data[20] = value;
-    sset(&proposal_data_key(count), &proposal_data);
+    // data: [0..20]=target, [20]=value
+    let mut data = [0u8; 32];
+    data[0..20].copy_from_slice(target);
+    data[20] = value;
+    sset(&proposal_data_key(count), &data);
 
     sset(&PROPOSAL_COUNT_KEY, &count.to_le_bytes());
 
-    let mut output = [0u8; 32];
-    output[28..32].copy_from_slice(&count.to_be_bytes());
-    api::return_value(ReturnFlags::empty(), &output);
+    let mut out = [0u8; 32];
+    out[28..32].copy_from_slice(&count.to_be_bytes());
+    api::return_value(ReturnFlags::empty(), &out);
 }
 
+/// generic propose entrypoint is disabled to avoid abi misuse; use typed propose functions
 fn propose() {
-    let mut input = [0u8; 64];
-    api::call_data_copy(&mut input, 4);
-    let proposal_type = input[31];
-
-    match proposal_type {
-        1 => set_pylon_level(),
-        2 => set_pylon_org(),
-        3 => set_dns_controller(),
-        4 => whitelist_probe(),
-        5 => revoke_probe(),
-        _ => api::return_value(ReturnFlags::REVERT, b"invalid type"),
-    }
+    api::return_value(ReturnFlags::REVERT, b"use typed propose");
 }
 
+/// casts a vote on a proposal; equal weight for levels 5..7; one vote per address
+///
+/// returns: `uint16 tally_for_side`
 fn vote() {
-    let mut input = [0u8; 64];
+    let mut input = [0u8; 64]; // 2 slots (uint32, bool)
     api::call_data_copy(&mut input, 4);
 
     let proposal_id = u32::from_be_bytes([input[28], input[29], input[30], input[31]]);
@@ -482,159 +568,136 @@ fn vote() {
 
     let mut level = [0u8; 1];
     sget(&pylon_level_key(&voter), &mut level);
-
     if level[0] < 5 {
         api::return_value(ReturnFlags::REVERT, b"need level 5+");
     }
 
-    let mut existing_vote = [0u8; 1];
-    sget(&vote_key(proposal_id, &voter), &mut existing_vote);
-
-    if existing_vote[0] != 0 {
+    let mut existing = [0u8; 1];
+    sget(&vote_key(proposal_id, &voter), &mut existing);
+    if existing[0] != 0 {
         api::return_value(ReturnFlags::REVERT, b"already voted");
     }
 
     let weight = calculate_vote_weight(level[0]);
-
     sset(&vote_key(proposal_id, &voter), &[support as u8 + 1]);
 
-    let mut tally_bytes = [0u8; 2];
-    sget(&vote_weight_key(proposal_id, support), &mut tally_bytes);
-    let mut tally = u16::from_le_bytes(tally_bytes);
-    tally += weight as u16;
+    let mut tall = [0u8; 2];
+    sget(&vote_weight_key(proposal_id, support), &mut tall);
+    let mut tally = u16::from_le_bytes(tall);
+    tally = tally.saturating_add(weight as u16);
     sset(&vote_weight_key(proposal_id, support), &tally.to_le_bytes());
 
-    let mut output = [0u8; 32];
-    output[30..32].copy_from_slice(&tally.to_le_bytes());
-    api::return_value(ReturnFlags::empty(), &output);
+    let mut out = [0u8; 32];
+    out[30..32].copy_from_slice(&tally.to_le_bytes());
+    api::return_value(ReturnFlags::empty(), &out);
 }
 
+/// executes a proposal if a 2/3 majority is met and the proposal is not already executed
 fn execute_proposal() {
     let mut input = [0u8; 32];
     api::call_data_copy(&mut input, 4);
 
     let proposal_id = u32::from_be_bytes([input[28], input[29], input[30], input[31]]);
 
+    // prevent re-execution
+    let mut ex = [0u8; 1];
+    sget(&proposal_executed_key(proposal_id), &mut ex);
+    if ex[0] != 0 {
+        api::return_value(ReturnFlags::REVERT, b"already executed");
+    }
+
     let mut yes_bytes = [0u8; 2];
     sget(&vote_weight_key(proposal_id, true), &mut yes_bytes);
-    let yes_weight = u16::from_le_bytes(yes_bytes);
+    let yes = u16::from_le_bytes(yes_bytes);
 
     let mut no_bytes = [0u8; 2];
     sget(&vote_weight_key(proposal_id, false), &mut no_bytes);
-    let no_weight = u16::from_le_bytes(no_bytes);
+    let no = u16::from_le_bytes(no_bytes);
 
-    let total = yes_weight + no_weight;
-    if total == 0 || (yes_weight * 3) < (total * 2) {
+    let total = yes + no;
+    if total == 0 || (yes * 3) < (total * 2) {
         api::return_value(ReturnFlags::REVERT, b"need 2/3 majority");
     }
 
-    let mut proposal_meta = [0u8; 32];
-    sget(&proposal_key(proposal_id), &mut proposal_meta);
-    let proposal_type = proposal_meta[0];
+    let mut meta = [0u8; 32];
+    sget(&proposal_key(proposal_id), &mut meta);
+    let ptype = meta[0];
 
-    match proposal_type {
-        1 => execute_set_pylon_level_internal(proposal_id),
-        2 => execute_set_pylon_org_internal(proposal_id),
-        3 => execute_set_dns_controller_internal(proposal_id),
-        4 => execute_whitelist_probe_internal(proposal_id),
-        5 => execute_revoke_probe_internal(proposal_id),
+    match ptype {
+        1 => apply_set_pylon_level(proposal_id),
+        2 => apply_set_pylon_org(proposal_id),
+        3 => apply_set_dns_controller(proposal_id),
+        4 => apply_whitelist_probe(proposal_id),
+        5 => apply_revoke_probe(proposal_id),
         _ => api::return_value(ReturnFlags::REVERT, b"invalid type"),
     }
+
+    // mark executed
+    sset(&proposal_executed_key(proposal_id), &[1u8]);
+    api::return_value(ReturnFlags::empty(), &[]);
 }
 
-fn execute_set_pylon_level() {
-    execute_proposal();
-}
-
-fn execute_set_pylon_level_internal(proposal_id: u32) {
-    let mut proposal_data = [0u8; 32];
-    sget(&proposal_data_key(proposal_id), &mut proposal_data);
+/// applies a pylon level change decided by governance
+fn apply_set_pylon_level(proposal_id: u32) {
+    let mut data = [0u8; 32];
+    sget(&proposal_data_key(proposal_id), &mut data);
 
     let mut pylon = [0u8; 20];
-    pylon.copy_from_slice(&proposal_data[0..20]);
-    let new_level = proposal_data[20];
+    pylon.copy_from_slice(&data[0..20]);
+    let new_level = data[20];
 
     sset(&pylon_level_key(&pylon), &[new_level]);
-
-    let mut output = [0u8; 32];
-    output[31] = 1;
-    api::return_value(ReturnFlags::empty(), &output);
 }
 
-fn execute_set_pylon_org() {
-    execute_proposal();
-}
-
-fn execute_set_pylon_org_internal(proposal_id: u32) {
-    let mut proposal_data = [0u8; 32];
-    sget(&proposal_data_key(proposal_id), &mut proposal_data);
+/// applies a pylon org change decided by governance
+fn apply_set_pylon_org(proposal_id: u32) {
+    let mut data = [0u8; 32];
+    sget(&proposal_data_key(proposal_id), &mut data);
 
     let mut pylon = [0u8; 20];
-    pylon.copy_from_slice(&proposal_data[0..20]);
-    let org_id = proposal_data[20];
+    pylon.copy_from_slice(&data[0..20]);
+    let org_id = data[20];
 
     sset(&pylon_org_key(&pylon), &[org_id]);
-
-    let mut output = [0u8; 32];
-    output[31] = 1;
-    api::return_value(ReturnFlags::empty(), &output);
 }
 
-fn execute_set_dns_controller() {
-    execute_proposal();
-}
-
-fn execute_set_dns_controller_internal(proposal_id: u32) {
-    let mut proposal_data = [0u8; 32];
-    sget(&proposal_data_key(proposal_id), &mut proposal_data);
+/// applies a dns controller change decided by governance
+fn apply_set_dns_controller(proposal_id: u32) {
+    let mut data = [0u8; 32];
+    sget(&proposal_data_key(proposal_id), &mut data);
 
     let mut controller = [0u8; 20];
-    controller.copy_from_slice(&proposal_data[0..20]);
-    let org_id = proposal_data[20];
+    controller.copy_from_slice(&data[0..20]);
+    let org_id = data[20];
 
     sset(&dns_controller_key(org_id), &controller);
-
-    let mut output = [0u8; 32];
-    output[31] = 1;
-    api::return_value(ReturnFlags::empty(), &output);
 }
 
-fn execute_whitelist_probe() {
-    execute_proposal();
-}
-
-fn execute_whitelist_probe_internal(proposal_id: u32) {
-    let mut proposal_data = [0u8; 32];
-    sget(&proposal_data_key(proposal_id), &mut proposal_data);
+/// whitelists a probe decided by governance
+fn apply_whitelist_probe(proposal_id: u32) {
+    let mut data = [0u8; 32];
+    sget(&proposal_data_key(proposal_id), &mut data);
 
     let mut probe = [0u8; 20];
-    probe.copy_from_slice(&proposal_data[0..20]);
+    probe.copy_from_slice(&data[0..20]);
 
     sset(&probe_whitelist_key(&probe), &[1u8]);
-
-    let mut output = [0u8; 32];
-    output[31] = 1;
-    api::return_value(ReturnFlags::empty(), &output);
 }
 
-fn execute_revoke_probe() {
-    execute_proposal();
-}
-
-fn execute_revoke_probe_internal(proposal_id: u32) {
-    let mut proposal_data = [0u8; 32];
-    sget(&proposal_data_key(proposal_id), &mut proposal_data);
+/// revokes a probe decided by governance
+fn apply_revoke_probe(proposal_id: u32) {
+    let mut data = [0u8; 32];
+    sget(&proposal_data_key(proposal_id), &mut data);
 
     let mut probe = [0u8; 20];
-    probe.copy_from_slice(&proposal_data[0..20]);
+    probe.copy_from_slice(&data[0..20]);
 
     sset(&probe_whitelist_key(&probe), &[0u8]);
-
-    let mut output = [0u8; 32];
-    output[31] = 1;
-    api::return_value(ReturnFlags::empty(), &output);
 }
 
+/// returns network info: level requirement and org dns flags
+///
+/// returns: `(uint8 level_requirement, bool ibp_dns_enabled, bool dotters_dns_enabled)`
 fn get_network_info() {
     let mut input = [0u8; 32];
     api::call_data_copy(&mut input, 4);
@@ -650,53 +713,68 @@ fn get_network_info() {
     let mut dotters_dns = [0u8; 1];
     sget(&dns_key(network_id, 2), &mut dotters_dns);
 
-    let mut output = [0u8; 32];
-    output[29] = level_req[0];
-    output[30] = ibp_dns[0];
-    output[31] = dotters_dns[0];
-    api::return_value(ReturnFlags::empty(), &output);
+    // abi: 3 slots (96 bytes)
+    let mut out = [0u8; 96];
+    out[31] = level_req[0];
+    out[63] = ibp_dns[0];
+    out[95] = dotters_dns[0];
+    api::return_value(ReturnFlags::empty(), &out);
 }
 
+/// returns the total number of networks
+///
+/// returns: `uint32 count`
 fn get_network_count() {
     let mut count_bytes = [0u8; 4];
     sget(&NETWORK_COUNT_KEY, &mut count_bytes);
     let count = u32::from_le_bytes(count_bytes);
 
-    let mut output = [0u8; 32];
-    output[28..32].copy_from_slice(&count.to_be_bytes());
-    api::return_value(ReturnFlags::empty(), &output);
+    let mut out = [0u8; 32];
+    out[28..32].copy_from_slice(&count.to_be_bytes());
+    api::return_value(ReturnFlags::empty(), &out);
 }
 
+/// returns dns controller for an org
+///
+/// returns: `address controller`
 fn get_dns_controller() {
     let mut input = [0u8; 32];
     api::call_data_copy(&mut input, 4);
 
     let org_id = input[31];
-
-    if org_id != 1 && org_id != 2 {
+    if !(org_id == 1 || org_id == 2) {
         api::return_value(ReturnFlags::REVERT, b"invalid org");
     }
 
     let mut controller = [0u8; 20];
     sget(&dns_controller_key(org_id), &mut controller);
 
-    let mut output = [0u8; 32];
-    output[12..32].copy_from_slice(&controller);
-    api::return_value(ReturnFlags::empty(), &output);
+    let mut out = [0u8; 32];
+    out[12..32].copy_from_slice(&controller);
+    api::return_value(ReturnFlags::empty(), &out);
 }
 
+/// returns proposal meta info
+///
+/// returns: `(uint8 proposal_type, address proposer)`
 fn get_proposal() {
     let mut input = [0u8; 32];
     api::call_data_copy(&mut input, 4);
 
     let proposal_id = u32::from_be_bytes([input[28], input[29], input[30], input[31]]);
 
-    let mut proposal_data = [0u8; 32];
-    sget(&proposal_key(proposal_id), &mut proposal_data);
+    let mut meta = [0u8; 32];
+    sget(&proposal_key(proposal_id), &mut meta);
 
-    api::return_value(ReturnFlags::empty(), &proposal_data);
+    let mut out = [0u8; 64];
+    out[31] = meta[0];
+    out[44..64].copy_from_slice(&meta[1..21]);
+    api::return_value(ReturnFlags::empty(), &out);
 }
 
+/// returns a pylon's level
+///
+/// returns: `uint8 level`
 fn get_pylon_level() {
     let mut input = [0u8; 32];
     api::call_data_copy(&mut input, 4);
@@ -707,11 +785,16 @@ fn get_pylon_level() {
     let mut level = [0u8; 1];
     sget(&pylon_level_key(&pylon), &mut level);
 
-    let mut output = [0u8; 32];
-    output[31] = level[0];
-    api::return_value(ReturnFlags::empty(), &output);
+    let mut out = [0u8; 32];
+    out[31] = level[0];
+    api::return_value(ReturnFlags::empty(), &out);
 }
 
+/// returns a pylon's current status
+///
+/// status: 0 healthy, 1 degraded, 2 insufficient reports
+///
+/// returns: `uint8 status`
 fn get_pylon_status() {
     let mut input = [0u8; 32];
     api::call_data_copy(&mut input, 4);
@@ -722,11 +805,25 @@ fn get_pylon_status() {
     let mut status = [0u8; 1];
     sget(&pylon_status_key(&pylon), &mut status);
 
-    let mut output = [0u8; 32];
-    output[31] = status[0];
-    api::return_value(ReturnFlags::empty(), &output);
+    let mut out = [0u8; 32];
+    out[31] = status[0];
+    api::return_value(ReturnFlags::empty(), &out);
 }
 
+/// returns a pylon's status key
+#[inline(always)]
+fn pylon_status_key(pylon: &[u8; 20]) -> [u8; 32] {
+    let mut key = [0u8; 32];
+    key[0] = PYLON_STATUS_PREFIX;
+    key[1..21].copy_from_slice(pylon);
+    key
+}
+
+/// returns aggregated pylon metrics for the last finalized window
+///
+/// fields: uptime (uint8), latency (uint16), regions (uint32 bitset), window (uint32), report_count (uint8)
+///
+/// returns: `(uint8 uptime, uint16 latency, uint32 regions, uint32 window, uint8 report_count)`
 fn get_pylon_metrics() {
     let mut input = [0u8; 32];
     api::call_data_copy(&mut input, 4);
@@ -734,14 +831,30 @@ fn get_pylon_metrics() {
     let mut pylon = [0u8; 20];
     pylon.copy_from_slice(&input[12..32]);
 
-    let mut metrics = [0u8; 16];
-    sget(&pylon_metrics_key(&pylon), &mut metrics);
+    let mut m = [0u8; 16];
+    sget(&pylon_metrics_key(&pylon), &mut m);
 
-    let mut output = [0u8; 32];
-    output[16..32].copy_from_slice(&metrics);
-    api::return_value(ReturnFlags::empty(), &output);
+    let mut out = [0u8; 160]; // 5 slots
+    out[31] = m[0];                        // uint8 uptime
+    out[62..64].copy_from_slice(&m[1..3]); // uint16 latency
+    out[92..96].copy_from_slice(&m[3..7]); // uint32 regions
+    out[124..128].copy_from_slice(&m[7..11]); // uint32 window
+    out[159] = m[11];                      // uint8 report_count
+    api::return_value(ReturnFlags::empty(), &out);
 }
 
+/// returns pylon's metrics key
+#[inline(always)]
+fn pylon_metrics_key(pylon: &[u8; 20]) -> [u8; 32] {
+    let mut key = [0u8; 32];
+    key[0] = PYLON_METRICS_PREFIX;
+    key[1..21].copy_from_slice(pylon);
+    key
+}
+
+/// checks whether a probe is whitelisted
+///
+/// returns: `bool whitelisted`
 fn is_probe_whitelisted() {
     let mut input = [0u8; 32];
     api::call_data_copy(&mut input, 4);
@@ -749,125 +862,145 @@ fn is_probe_whitelisted() {
     let mut probe = [0u8; 20];
     probe.copy_from_slice(&input[12..32]);
 
-    let mut whitelisted = [0u8; 1];
-    sget(&probe_whitelist_key(&probe), &mut whitelisted);
+    let mut wl = [0u8; 1];
+    sget(&probe_whitelist_key(&probe), &mut wl);
 
-    let mut output = [0u8; 32];
-    output[31] = whitelisted[0];
-    api::return_value(ReturnFlags::empty(), &output);
+    let mut out = [0u8; 32];
+    out[31] = wl[0];
+    api::return_value(ReturnFlags::empty(), &out);
 }
 
+/// returns probe's whitelist key
+#[inline(always)]
+fn probe_whitelist_key(probe: &[u8; 20]) -> [u8; 32] {
+    let mut key = [0u8; 32];
+    key[0] = PROBE_WHITELIST_PREFIX;
+    key[1..21].copy_from_slice(probe);
+    key
+}
+
+/// records a probe report for a pylon within the current window (one per probe per window)
+///
+/// args: (address pylon, uint32 regions, uint16 latency, uint8 uptime)
+///
+/// returns: `uint32 window`
 fn report_probe_data() {
-    let mut input = [0u8; 68];
+    let mut input = [0u8; 128]; // 4 slots
     api::call_data_copy(&mut input, 4);
 
     let mut pylon = [0u8; 20];
     pylon.copy_from_slice(&input[12..32]);
 
-    let regions = u32::from_be_bytes([input[32], input[33], input[34], input[35]]);
-    let latency = u16::from_be_bytes([input[36], input[37]]);
-    let uptime = input[67];
+    let regions = u32::from_be_bytes([input[60], input[61], input[62], input[63]]);
+    let latency = u16::from_be_bytes([input[94], input[95]]);
+    let uptime = input[127];
 
     let mut caller = [0u8; 20];
     api::caller(&mut caller);
 
-    let mut whitelisted = [0u8; 1];
-    sget(&probe_whitelist_key(&caller), &mut whitelisted);
-
-    if whitelisted[0] == 0 {
+    let mut wl = [0u8; 1];
+    sget(&probe_whitelist_key(&caller), &mut wl);
+    if wl[0] == 0 {
         api::return_value(ReturnFlags::REVERT, b"probe not whitelisted");
     }
 
     let mut pylon_level = [0u8; 1];
     sget(&pylon_level_key(&pylon), &mut pylon_level);
-
     if pylon_level[0] == 0 {
         api::return_value(ReturnFlags::REVERT, b"invalid pylon");
     }
 
-    let mut current_time = [0u8; 32];
-    api::now(&mut current_time);
-    let mut time_bytes = [0u8; 8];
-    time_bytes.copy_from_slice(&current_time[..8]);
-    let current_timestamp = u64::from_le_bytes(time_bytes);
-    let window = (current_timestamp / REPORT_INTERVAL) as u32;
+    let mut now32 = [0u8; 32];
+    api::now(&mut now32);
+    let mut lo = [0u8; 8];
+    lo.copy_from_slice(&now32[..8]);
+    let now = u64::from_le_bytes(lo);
+    let window = (now / REPORT_INTERVAL) as u32;
 
+    // enforce one report per probe per window (collision-proof key)
     let mut reported = [0u8; 1];
     sget(&probe_report_key(&pylon, window, &caller), &mut reported);
-
     if reported[0] != 0 {
         api::return_value(ReturnFlags::REVERT, b"already reported");
     }
-
     sset(&probe_report_key(&pylon, window, &caller), &[1u8]);
 
-    let mut window_data = [0u8; 12];
-    sget(&probe_window_key(&pylon, window), &mut window_data);
+    // aggregate into window accumulator: [0]=count, [1..3]=sum uptime u16, [3..7]=sum latency u32, [7..11]=regions bitset u32
+    let mut wdata = [0u8; 12];
+    sget(&probe_window_key(&pylon, window), &mut wdata);
 
-    let mut report_count = window_data[0];
-    let mut total_uptime = u16::from_le_bytes([window_data[1], window_data[2]]);
-    let mut total_latency =
-        u32::from_le_bytes([window_data[3], window_data[4], window_data[5], window_data[6]]);
-    let mut regions_coverage =
-        u32::from_le_bytes([window_data[7], window_data[8], window_data[9], window_data[10]]);
+    let mut count = wdata[0];
+    let mut sum_uptime = u16::from_le_bytes([wdata[1], wdata[2]]);
+    let mut sum_latency = u32::from_le_bytes([wdata[3], wdata[4], wdata[5], wdata[6]]);
+    let mut regions_cov = u32::from_le_bytes([wdata[7], wdata[8], wdata[9], wdata[10]]);
 
-    report_count += 1;
-    total_uptime += uptime as u16;
-    total_latency += latency as u32;
-    regions_coverage |= regions;
+    count = count.saturating_add(1);
+    sum_uptime = sum_uptime.saturating_add(uptime as u16);
+    sum_latency = sum_latency.saturating_add(latency as u32);
+    regions_cov |= regions;
 
-    window_data[0] = report_count;
-    window_data[1..3].copy_from_slice(&total_uptime.to_le_bytes());
-    window_data[3..7].copy_from_slice(&total_latency.to_le_bytes());
-    window_data[7..11].copy_from_slice(&regions_coverage.to_le_bytes());
+    wdata[0] = count;
+    wdata[1..3].copy_from_slice(&sum_uptime.to_le_bytes());
+    wdata[3..7].copy_from_slice(&sum_latency.to_le_bytes());
+    wdata[7..11].copy_from_slice(&regions_cov.to_le_bytes());
+    sset(&probe_window_key(&pylon, window), &wdata);
 
-    sset(&probe_window_key(&pylon, window), &window_data);
-
-    let mut output = [0u8; 32];
-    output[28..32].copy_from_slice(&window.to_be_bytes());
-    api::return_value(ReturnFlags::empty(), &output);
+    let mut out = [0u8; 32];
+    out[28..32].copy_from_slice(&window.to_be_bytes());
+    api::return_value(ReturnFlags::empty(), &out);
 }
 
+/// finalizes a window for a pylon; guarded to prevent duplicate finalizations; updates status and metrics
+///
+/// returns: `uint8 status`
 fn finalize_window() {
-    let mut input = [0u8; 36];
+    let mut input = [0u8; 64]; // 2 slots (address, uint32)
     api::call_data_copy(&mut input, 4);
 
     let mut pylon = [0u8; 20];
     pylon.copy_from_slice(&input[12..32]);
-    let window = u32::from_be_bytes([input[32], input[33], input[34], input[35]]);
+    let window = u32::from_be_bytes([input[60], input[61], input[62], input[63]]);
 
-    let mut current_time = [0u8; 32];
-    api::now(&mut current_time);
-    let mut time_bytes = [0u8; 8];
-    time_bytes.copy_from_slice(&current_time[..8]);
-    let current_timestamp = u64::from_le_bytes(time_bytes);
-    let current_window = (current_timestamp / REPORT_INTERVAL) as u32;
+    let mut now32 = [0u8; 32];
+    api::now(&mut now32);
+    let mut lo = [0u8; 8];
+    lo.copy_from_slice(&now32[..8]);
+    let now = u64::from_le_bytes(lo);
+    let current_window = (now / REPORT_INTERVAL) as u32;
 
     if window >= current_window {
         api::return_value(ReturnFlags::REVERT, b"window not complete");
     }
 
-    let mut window_data = [0u8; 12];
-    sget(&probe_window_key(&pylon, window), &mut window_data);
-
-    let report_count = window_data[0];
-
-    if report_count < MIN_PROBES_FOR_CONSENSUS {
-        sset(&pylon_status_key(&pylon), &[2u8]);
-        api::return_value(ReturnFlags::empty(), &[2u8]);
+    // prevent duplicate finalization
+    let mut fin = [0u8; 1];
+    sget(&window_finalized_key(&pylon, window), &mut fin);
+    if fin[0] != 0 {
+        api::return_value(ReturnFlags::REVERT, b"already finalized");
     }
 
-    let total_uptime = u16::from_le_bytes([window_data[1], window_data[2]]);
-    let total_latency =
-        u32::from_le_bytes([window_data[3], window_data[4], window_data[5], window_data[6]]);
-    let regions =
-        u32::from_le_bytes([window_data[7], window_data[8], window_data[9], window_data[10]]);
+    let mut wdata = [0u8; 12];
+    sget(&probe_window_key(&pylon, window), &mut wdata);
 
-    let avg_uptime = (total_uptime / report_count as u16) as u8;
-    let avg_latency = (total_latency / report_count as u32) as u16;
+    let count = wdata[0];
+
+    if count < MIN_PROBES_FOR_CONSENSUS {
+        sset(&pylon_status_key(&pylon), &[2u8]);
+        sset(&window_finalized_key(&pylon, window), &[1u8]);
+        let mut out = [0u8; 32];
+        out[31] = 2;
+        api::return_value(ReturnFlags::empty(), &out);
+    }
+
+    let sum_uptime = u16::from_le_bytes([wdata[1], wdata[2]]);
+    let sum_latency = u32::from_le_bytes([wdata[3], wdata[4], wdata[5], wdata[6]]);
+    let regions = u32::from_le_bytes([wdata[7], wdata[8], wdata[9], wdata[10]]);
+
+    // integer averages
+    let avg_uptime = (sum_uptime / count as u16) as u8;
+    let avg_latency = (sum_latency / count as u32) as u16;
 
     let status = if avg_uptime < DEGRADATION_THRESHOLD { 1u8 } else { 0u8 };
-
     sset(&pylon_status_key(&pylon), &[status]);
 
     let mut metrics = [0u8; 16];
@@ -875,25 +1008,21 @@ fn finalize_window() {
     metrics[1..3].copy_from_slice(&avg_latency.to_le_bytes());
     metrics[3..7].copy_from_slice(&regions.to_le_bytes());
     metrics[7..11].copy_from_slice(&window.to_le_bytes());
-    metrics[11] = report_count;
+    metrics[11] = count;
 
     sset(&pylon_metrics_key(&pylon), &metrics);
+    sset(&probe_window_key(&pylon, window), &[0u8; 12]); // clear accumulator
+    sset(&window_finalized_key(&pylon, window), &[1u8]); // mark finalized
 
-    sset(&probe_window_key(&pylon, window), &[0u8; 12]);
-
-    let mut output = [0u8; 32];
-    output[31] = status;
-    api::return_value(ReturnFlags::empty(), &output);
+    let mut out = [0u8; 32];
+    out[31] = status;
+    api::return_value(ReturnFlags::empty(), &out);
 }
 
-// vote weight based on rank level
+/// vote weight calculation for governance (equal weights across ranks 5..7)
 fn calculate_vote_weight(level: u8) -> u8 {
     match level {
-        5 => 1,
-        6 => 1,
-        7 => 1,
-        8 => 1,
-        9 => 1,
+        5 | 6 | 7 => 1,
         _ => 0,
     }
 }
