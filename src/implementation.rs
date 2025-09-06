@@ -1,7 +1,7 @@
 #![no_main]
 #![no_std]
 
-use uapi::{HostFn, HostFnImpl as api, ReturnFlags};
+use uapi::{HostFn, HostFnImpl as api, ReturnFlags, StorageFlags};
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
@@ -174,10 +174,10 @@ fn pylon_metrics_key(pylon: &[u8; 20]) -> [u8; 32] {
 #[no_mangle]
 #[polkavm_derive::polkavm_export]
 pub extern "C" fn deploy() {
-   api::set_storage(&org_key(1), b"IBP");
-   api::set_storage(&org_key(2), b"Dotters");
-   api::set_storage(&NETWORK_COUNT_KEY, &0u32.to_le_bytes());
-   api::set_storage(&PROPOSAL_COUNT_KEY, &0u32.to_le_bytes());
+   api::set_storage(StorageFlags::empty(), &org_key(1), b"IBP");
+   api::set_storage(StorageFlags::empty(), &org_key(2), b"Dotters");
+   api::set_storage(StorageFlags::empty(), &NETWORK_COUNT_KEY, &0u32.to_le_bytes());
+   api::set_storage(StorageFlags::empty(), &PROPOSAL_COUNT_KEY, &0u32.to_le_bytes());
 }
 
 /// routes calls to appropriate function based on selector
@@ -225,7 +225,7 @@ fn create_network() {
    api::caller(&mut caller);
 
    let mut level = [0u8; 1];
-   api::get_storage(&pylon_level_key(&caller), &mut level);
+   api::get_storage(StorageFlags::empty(), &pylon_level_key(&caller), &mut level);
 
    if level[0] < 5 {
        api::return_value(ReturnFlags::REVERT, b"need level 5+");
@@ -233,15 +233,15 @@ fn create_network() {
    }
 
    let mut count_bytes = [0u8; 4];
-   api::get_storage(&NETWORK_COUNT_KEY, &mut count_bytes);
+   api::get_storage(StorageFlags::empty(), &NETWORK_COUNT_KEY, &mut count_bytes);
    let mut count = u32::from_le_bytes(count_bytes);
 
    count += 1;
    let network_id = count;
 
-   api::set_storage(&NETWORK_COUNT_KEY, &count.to_le_bytes());
-   api::set_storage(&network_key(network_id), &level);
-   api::set_storage(&pylon_key(network_id, &caller), &[1u8]);
+   api::set_storage(StorageFlags::empty(), &NETWORK_COUNT_KEY, &count.to_le_bytes());
+   api::set_storage(StorageFlags::empty(), &network_key(network_id), &level);
+   api::set_storage(StorageFlags::empty(), &pylon_key(network_id, &caller), &[1u8]);
 
    let mut output = [0u8; 32];
    output[28..32].copy_from_slice(&network_id.to_be_bytes());
@@ -266,20 +266,20 @@ fn set_network_dns() {
    api::caller(&mut caller);
 
    let mut controller = [0u8; 20];
-   api::get_storage(&dns_controller_key(org_id), &mut controller);
+   api::get_storage(StorageFlags::empty(), &dns_controller_key(org_id), &mut controller);
 
    let mut is_pylon = [0u8; 1];
-   api::get_storage(&pylon_key(network_id, &caller), &mut is_pylon);
+   api::get_storage(StorageFlags::empty(), &pylon_key(network_id, &caller), &mut is_pylon);
 
    let mut level = [0u8; 1];
-   api::get_storage(&pylon_level_key(&caller), &mut level);
+   api::get_storage(StorageFlags::empty(), &pylon_level_key(&caller), &mut level);
 
    if caller != controller && (is_pylon[0] == 0 || level[0] < 5) {
        api::return_value(ReturnFlags::REVERT, b"not authorized");
        return;
    }
 
-   api::set_storage(&dns_key(network_id, org_id), &[enabled as u8]);
+   api::set_storage(StorageFlags::empty(), &dns_key(network_id, org_id), &[enabled as u8]);
    api::return_value(ReturnFlags::empty(), &[]);
 }
 
@@ -296,18 +296,18 @@ fn add_pylon() {
    api::caller(&mut caller);
 
    let mut is_pylon = [0u8; 1];
-   api::get_storage(&pylon_key(network_id, &caller), &mut is_pylon);
+   api::get_storage(StorageFlags::empty(), &pylon_key(network_id, &caller), &mut is_pylon);
 
    let mut level = [0u8; 1];
-   api::get_storage(&pylon_level_key(&caller), &mut level);
+   api::get_storage(StorageFlags::empty(), &pylon_level_key(&caller), &mut level);
 
    if is_pylon[0] == 0 || level[0] < 5 {
        api::return_value(ReturnFlags::REVERT, b"not authorized");
        return;
    }
 
-   api::set_storage(&pylon_key(network_id, &new_pylon), &[1u8]);
-   api::set_storage(&pylon_status_key(&new_pylon), &[0u8]);
+   api::set_storage(StorageFlags::empty(), &pylon_key(network_id, &new_pylon), &[1u8]);
+   api::set_storage(StorageFlags::empty(), &pylon_status_key(&new_pylon), &[0u8]);
    api::return_value(ReturnFlags::empty(), &[]);
 }
 
@@ -395,7 +395,7 @@ fn create_proposal(proposal_type: u8, target: &[u8; 20], value: u8) {
    api::caller(&mut caller);
 
    let mut level = [0u8; 1];
-   api::get_storage(&pylon_level_key(&caller), &mut level);
+   api::get_storage(StorageFlags::empty(), &pylon_level_key(&caller), &mut level);
 
    if level[0] < 5 {
        api::return_value(ReturnFlags::REVERT, b"need level 5+");
@@ -403,21 +403,21 @@ fn create_proposal(proposal_type: u8, target: &[u8; 20], value: u8) {
    }
 
    let mut count_bytes = [0u8; 4];
-   api::get_storage(&PROPOSAL_COUNT_KEY, &mut count_bytes);
+   api::get_storage(StorageFlags::empty(), &PROPOSAL_COUNT_KEY, &mut count_bytes);
    let mut count = u32::from_le_bytes(count_bytes);
    count += 1;
 
    let mut proposal_meta = [0u8; 32];
    proposal_meta[0] = proposal_type;
    proposal_meta[1..21].copy_from_slice(&caller);
-   api::set_storage(&proposal_key(count), &proposal_meta);
+   api::set_storage(StorageFlags::empty(), &proposal_key(count), &proposal_meta);
 
    let mut proposal_data = [0u8; 32];
    proposal_data[0..20].copy_from_slice(target);
    proposal_data[20] = value;
-   api::set_storage(&proposal_data_key(count), &proposal_data);
+   api::set_storage(StorageFlags::empty(), &proposal_data_key(count), &proposal_data);
 
-   api::set_storage(&PROPOSAL_COUNT_KEY, &count.to_le_bytes());
+   api::set_storage(StorageFlags::empty(), &PROPOSAL_COUNT_KEY, &count.to_le_bytes());
 
    let mut output = [0u8; 32];
    output[28..32].copy_from_slice(&count.to_be_bytes());
@@ -452,7 +452,7 @@ fn vote() {
    api::caller(&mut voter);
 
    let mut level = [0u8; 1];
-   api::get_storage(&pylon_level_key(&voter), &mut level);
+   api::get_storage(StorageFlags::empty(), &pylon_level_key(&voter), &mut level);
 
    if level[0] < 5 {
        api::return_value(ReturnFlags::REVERT, b"need level 5+");
@@ -460,7 +460,7 @@ fn vote() {
    }
 
    let mut existing_vote = [0u8; 1];
-   api::get_storage(&vote_key(proposal_id, &voter), &mut existing_vote);
+   api::get_storage(StorageFlags::empty(), &vote_key(proposal_id, &voter), &mut existing_vote);
 
    if existing_vote[0] != 0 {
        api::return_value(ReturnFlags::REVERT, b"already voted");
@@ -469,13 +469,13 @@ fn vote() {
 
    let weight = calculate_vote_weight(level[0]);
 
-   api::set_storage(&vote_key(proposal_id, &voter), &[support as u8 + 1]);
+   api::set_storage(StorageFlags::empty(), &vote_key(proposal_id, &voter), &[support as u8 + 1]);
 
    let mut tally_bytes = [0u8; 2];
-   api::get_storage(&vote_weight_key(proposal_id, support), &mut tally_bytes);
+   api::get_storage(StorageFlags::empty(), &vote_weight_key(proposal_id, support), &mut tally_bytes);
    let mut tally = u16::from_le_bytes(tally_bytes);
    tally += weight as u16;
-   api::set_storage(&vote_weight_key(proposal_id, support), &tally.to_le_bytes());
+   api::set_storage(StorageFlags::empty(), &vote_weight_key(proposal_id, support), &tally.to_le_bytes());
 
    let mut output = [0u8; 32];
    output[30..32].copy_from_slice(&tally.to_le_bytes());
@@ -490,11 +490,11 @@ fn execute_proposal() {
    let proposal_id = u32::from_be_bytes([input[28], input[29], input[30], input[31]]);
 
    let mut yes_bytes = [0u8; 2];
-   api::get_storage(&vote_weight_key(proposal_id, true), &mut yes_bytes);
+   api::get_storage(StorageFlags::empty(), &vote_weight_key(proposal_id, true), &mut yes_bytes);
    let yes_weight = u16::from_le_bytes(yes_bytes);
 
    let mut no_bytes = [0u8; 2];
-   api::get_storage(&vote_weight_key(proposal_id, false), &mut no_bytes);
+   api::get_storage(StorageFlags::empty(), &vote_weight_key(proposal_id, false), &mut no_bytes);
    let no_weight = u16::from_le_bytes(no_bytes);
 
    let total = yes_weight + no_weight;
@@ -504,7 +504,7 @@ fn execute_proposal() {
    }
 
    let mut proposal_meta = [0u8; 32];
-   api::get_storage(&proposal_key(proposal_id), &mut proposal_meta);
+   api::get_storage(StorageFlags::empty(), &proposal_key(proposal_id), &mut proposal_meta);
    let proposal_type = proposal_meta[0];
 
    match proposal_type {
@@ -525,13 +525,13 @@ fn execute_set_pylon_level() {
 /// applies approved pylon level change
 fn execute_set_pylon_level_internal(proposal_id: u32) {
    let mut proposal_data = [0u8; 32];
-   api::get_storage(&proposal_data_key(proposal_id), &mut proposal_data);
+   api::get_storage(StorageFlags::empty(), &proposal_data_key(proposal_id), &mut proposal_data);
 
    let mut pylon = [0u8; 20];
    pylon.copy_from_slice(&proposal_data[0..20]);
    let new_level = proposal_data[20];
 
-   api::set_storage(&pylon_level_key(&pylon), &[new_level]);
+   api::set_storage(StorageFlags::empty(), &pylon_level_key(&pylon), &[new_level]);
 
    let mut output = [0u8; 32];
    output[31] = 1;
@@ -546,13 +546,13 @@ fn execute_set_pylon_org() {
 /// applies approved pylon organization change
 fn execute_set_pylon_org_internal(proposal_id: u32) {
    let mut proposal_data = [0u8; 32];
-   api::get_storage(&proposal_data_key(proposal_id), &mut proposal_data);
+   api::get_storage(StorageFlags::empty(), &proposal_data_key(proposal_id), &mut proposal_data);
 
    let mut pylon = [0u8; 20];
    pylon.copy_from_slice(&proposal_data[0..20]);
    let org_id = proposal_data[20];
 
-   api::set_storage(&pylon_org_key(&pylon), &[org_id]);
+   api::set_storage(StorageFlags::empty(), &pylon_org_key(&pylon), &[org_id]);
 
    let mut output = [0u8; 32];
    output[31] = 1;
@@ -567,13 +567,13 @@ fn execute_set_dns_controller() {
 /// applies approved dns controller change
 fn execute_set_dns_controller_internal(proposal_id: u32) {
    let mut proposal_data = [0u8; 32];
-   api::get_storage(&proposal_data_key(proposal_id), &mut proposal_data);
+   api::get_storage(StorageFlags::empty(), &proposal_data_key(proposal_id), &mut proposal_data);
 
    let mut controller = [0u8; 20];
    controller.copy_from_slice(&proposal_data[0..20]);
    let org_id = proposal_data[20];
 
-   api::set_storage(&dns_controller_key(org_id), &controller);
+   api::set_storage(StorageFlags::empty(), &dns_controller_key(org_id), &controller);
 
    let mut output = [0u8; 32];
    output[31] = 1;
@@ -588,12 +588,12 @@ fn execute_whitelist_probe() {
 /// applies approved probe whitelist addition
 fn execute_whitelist_probe_internal(proposal_id: u32) {
    let mut proposal_data = [0u8; 32];
-   api::get_storage(&proposal_data_key(proposal_id), &mut proposal_data);
+   api::get_storage(StorageFlags::empty(), &proposal_data_key(proposal_id), &mut proposal_data);
 
    let mut probe = [0u8; 20];
    probe.copy_from_slice(&proposal_data[0..20]);
 
-   api::set_storage(&probe_whitelist_key(&probe), &[1u8]);
+   api::set_storage(StorageFlags::empty(), &probe_whitelist_key(&probe), &[1u8]);
 
    let mut output = [0u8; 32];
    output[31] = 1;
@@ -608,12 +608,12 @@ fn execute_revoke_probe() {
 /// applies approved probe whitelist revocation
 fn execute_revoke_probe_internal(proposal_id: u32) {
    let mut proposal_data = [0u8; 32];
-   api::get_storage(&proposal_data_key(proposal_id), &mut proposal_data);
+   api::get_storage(StorageFlags::empty(), &proposal_data_key(proposal_id), &mut proposal_data);
 
    let mut probe = [0u8; 20];
    probe.copy_from_slice(&proposal_data[0..20]);
 
-   api::set_storage(&probe_whitelist_key(&probe), &[0u8]);
+   api::set_storage(StorageFlags::empty(), &probe_whitelist_key(&probe), &[0u8]);
 
    let mut output = [0u8; 32];
    output[31] = 1;
@@ -628,13 +628,13 @@ fn get_network_info() {
    let network_id = u32::from_be_bytes([input[28], input[29], input[30], input[31]]);
 
    let mut level_req = [0u8; 1];
-   api::get_storage(&network_key(network_id), &mut level_req);
+   api::get_storage(StorageFlags::empty(), &network_key(network_id), &mut level_req);
 
    let mut ibp_dns = [0u8; 1];
-   api::get_storage(&dns_key(network_id, 1), &mut ibp_dns);
+   api::get_storage(StorageFlags::empty(), &dns_key(network_id, 1), &mut ibp_dns);
 
    let mut dotters_dns = [0u8; 1];
-   api::get_storage(&dns_key(network_id, 2), &mut dotters_dns);
+   api::get_storage(StorageFlags::empty(), &dns_key(network_id, 2), &mut dotters_dns);
 
    let mut output = [0u8; 32];
    output[29] = level_req[0];
@@ -646,7 +646,7 @@ fn get_network_info() {
 /// returns total number of networks created
 fn get_network_count() {
    let mut count_bytes = [0u8; 4];
-   api::get_storage(&NETWORK_COUNT_KEY, &mut count_bytes);
+   api::get_storage(StorageFlags::empty(), &NETWORK_COUNT_KEY, &mut count_bytes);
    let count = u32::from_le_bytes(count_bytes);
 
    let mut output = [0u8; 32];
@@ -667,7 +667,7 @@ fn get_dns_controller() {
    }
 
    let mut controller = [0u8; 20];
-   api::get_storage(&dns_controller_key(org_id), &mut controller);
+   api::get_storage(StorageFlags::empty(), &dns_controller_key(org_id), &mut controller);
 
    let mut output = [0u8; 32];
    output[12..32].copy_from_slice(&controller);
@@ -682,7 +682,7 @@ fn get_proposal() {
    let proposal_id = u32::from_be_bytes([input[28], input[29], input[30], input[31]]);
 
    let mut proposal_data = [0u8; 32];
-   api::get_storage(&proposal_key(proposal_id), &mut proposal_data);
+   api::get_storage(StorageFlags::empty(), &proposal_key(proposal_id), &mut proposal_data);
 
    api::return_value(ReturnFlags::empty(), &proposal_data);
 }
@@ -696,7 +696,7 @@ fn get_pylon_level() {
    pylon.copy_from_slice(&input[12..32]);
 
    let mut level = [0u8; 1];
-   api::get_storage(&pylon_level_key(&pylon), &mut level);
+   api::get_storage(StorageFlags::empty(), &pylon_level_key(&pylon), &mut level);
 
    let mut output = [0u8; 32];
    output[31] = level[0];
@@ -712,7 +712,7 @@ fn get_pylon_status() {
    pylon.copy_from_slice(&input[12..32]);
 
    let mut status = [0u8; 1];
-   api::get_storage(&pylon_status_key(&pylon), &mut status);
+   api::get_storage(StorageFlags::empty(), &pylon_status_key(&pylon), &mut status);
 
    let mut output = [0u8; 32];
    output[31] = status[0];
@@ -728,7 +728,7 @@ fn get_pylon_metrics() {
    pylon.copy_from_slice(&input[12..32]);
 
    let mut metrics = [0u8; 16];
-   api::get_storage(&pylon_metrics_key(&pylon), &mut metrics);
+   api::get_storage(StorageFlags::empty(), &pylon_metrics_key(&pylon), &mut metrics);
 
    let mut output = [0u8; 32];
    output[16..32].copy_from_slice(&metrics);
@@ -744,7 +744,7 @@ fn is_probe_whitelisted() {
    probe.copy_from_slice(&input[12..32]);
 
    let mut whitelisted = [0u8; 1];
-   api::get_storage(&probe_whitelist_key(&probe), &mut whitelisted);
+   api::get_storage(StorageFlags::empty(), &probe_whitelist_key(&probe), &mut whitelisted);
 
    let mut output = [0u8; 32];
    output[31] = whitelisted[0];
@@ -767,7 +767,7 @@ fn report_probe_data() {
    api::caller(&mut caller);
 
    let mut whitelisted = [0u8; 1];
-   api::get_storage(&probe_whitelist_key(&caller), &mut whitelisted);
+   api::get_storage(StorageFlags::empty(), &probe_whitelist_key(&caller), &mut whitelisted);
 
    if whitelisted[0] == 0 {
        api::return_value(ReturnFlags::REVERT, b"probe not whitelisted");
@@ -775,7 +775,7 @@ fn report_probe_data() {
    }
 
    let mut pylon_level = [0u8; 1];
-   api::get_storage(&pylon_level_key(&pylon), &mut pylon_level);
+   api::get_storage(StorageFlags::empty(), &pylon_level_key(&pylon), &mut pylon_level);
 
    if pylon_level[0] == 0 {
        api::return_value(ReturnFlags::REVERT, b"invalid pylon");
@@ -790,17 +790,17 @@ fn report_probe_data() {
    let window = (current_timestamp / REPORT_INTERVAL) as u32;
 
    let mut reported = [0u8; 1];
-   api::get_storage(&probe_report_key(&pylon, window, &caller), &mut reported);
+   api::get_storage(StorageFlags::empty(), &probe_report_key(&pylon, window, &caller), &mut reported);
 
    if reported[0] != 0 {
        api::return_value(ReturnFlags::REVERT, b"already reported");
        return;
    }
 
-   api::set_storage(&probe_report_key(&pylon, window, &caller), &[1u8]);
+   api::set_storage(StorageFlags::empty(), &probe_report_key(&pylon, window, &caller), &[1u8]);
 
    let mut window_data = [0u8; 12];
-   api::get_storage(&probe_window_key(&pylon, window), &mut window_data);
+   api::get_storage(StorageFlags::empty(), &probe_window_key(&pylon, window), &mut window_data);
 
    let mut report_count = window_data[0];
    let mut total_uptime = u16::from_le_bytes([window_data[1], window_data[2]]);
@@ -817,7 +817,7 @@ fn report_probe_data() {
    window_data[3..7].copy_from_slice(&total_latency.to_le_bytes());
    window_data[7..11].copy_from_slice(&regions_coverage.to_le_bytes());
 
-   api::set_storage(&probe_window_key(&pylon, window), &window_data);
+   api::set_storage(StorageFlags::empty(), &probe_window_key(&pylon, window), &window_data);
 
    let mut output = [0u8; 32];
    output[28..32].copy_from_slice(&window.to_be_bytes());
@@ -846,12 +846,12 @@ fn finalize_window() {
    }
 
    let mut window_data = [0u8; 12];
-   api::get_storage(&probe_window_key(&pylon, window), &mut window_data);
+   api::get_storage(StorageFlags::empty(), &probe_window_key(&pylon, window), &mut window_data);
 
    let report_count = window_data[0];
 
    if report_count < MIN_PROBES_FOR_CONSENSUS {
-       api::set_storage(&pylon_status_key(&pylon), &[2u8]);
+       api::set_storage(StorageFlags::empty(), &pylon_status_key(&pylon), &[2u8]);
        api::return_value(ReturnFlags::empty(), &[2u8]);
        return;
    }
@@ -869,7 +869,7 @@ fn finalize_window() {
        0u8
    };
 
-   api::set_storage(&pylon_status_key(&pylon), &[status]);
+   api::set_storage(StorageFlags::empty(), &pylon_status_key(&pylon), &[status]);
 
    let mut metrics = [0u8; 16];
    metrics[0] = avg_uptime;
@@ -878,9 +878,9 @@ fn finalize_window() {
    metrics[7..11].copy_from_slice(&window.to_le_bytes());
    metrics[11] = report_count;
 
-   api::set_storage(&pylon_metrics_key(&pylon), &metrics);
+   api::set_storage(StorageFlags::empty(), &pylon_metrics_key(&pylon), &metrics);
 
-   api::set_storage(&probe_window_key(&pylon, window), &[0u8; 12]);
+   api::set_storage(StorageFlags::empty(), &probe_window_key(&pylon, window), &[0u8; 12]);
 
    let mut output = [0u8; 32];
    output[31] = status;

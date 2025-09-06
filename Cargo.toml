@@ -1,19 +1,21 @@
 [package]
-name = "rust-contract-template"
+name = "ibp-contracts"
 version = "0.1.0"
 edition = "2021"
-publish = false
-rust-version = "1.84"
-
-[[bin]]
-name = "contract"
-path = "src/main.rs"
-
-[profile.release]
-opt-level = "s"
-lto = "fat"
-codegen-units = 1
 
 [dependencies]
-polkavm-derive = { version = "0.26" }
-uapi = { package = "pallet-revive-uapi", version = "0.6", default-features = false }
+uapi = { package = "pallet-revive-uapi", path = "../polkadot-sdk/substrate/frame/revive/uapi" }
+polkavm-derive = "0.29.0"
+
+[[bin]]
+name = "controller"
+path = "src/main.rs"
+
+[[bin]]
+name = "implementation"
+path = "src/implementation.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
+panic = "abort"
