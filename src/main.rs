@@ -1,3 +1,4 @@
+#![feature(alloc_error_handler)]
 #![no_main]
 #![no_std]
 
@@ -9,6 +10,69 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
         core::arch::asm!("unimp");
         core::hint::unreachable_unchecked();
     }
+}
+
+// ---- minimal bump allocator on a static buffer (required by `alloc`) ----
+mod alloc_support {
+    use core::{
+        alloc::{GlobalAlloc, Layout},
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    pub struct BumpAllocator {
+        offset: AtomicUsize,
+    }
+
+    const HEAP_SIZE: usize = 64 * 1024;
+
+    #[link_section = ".bss.heap"]
+    static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
+
+    unsafe impl GlobalAlloc for BumpAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let align = layout.align().max(8);
+            let size = layout.size();
+            let mut offset = self.offset.load(Ordering::Relaxed);
+            loop {
+                let aligned = (offset + align - 1) & !(align - 1);
+                if aligned + size > HEAP_SIZE {
+                    return core::ptr::null_mut();
+                }
+                match self.offset.compare_exchange_weak(
+                    offset,
+                    aligned + size,
+                    Ordering::SeqCst,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => return unsafe { HEAP.as_mut_ptr().add(aligned) },
+                    Err(o) => offset = o,
+                }
+            }
+        }
+        unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
+    }
+
+    #[global_allocator]
+    static GLOBAL: BumpAllocator = BumpAllocator { offset: AtomicUsize::new(0) };
+
+    #[alloc_error_handler]
+    fn alloc_error(_layout: Layout) -> ! {
+        unsafe {
+            core::arch::asm!("unimp");
+            core::hint::unreachable_unchecked();
+        }
+    }
+}
+
+// ---- tiny adapters for new uapi storage signatures ----
+#[inline(always)]
+fn sset(key: &[u8], value: &[u8]) {
+    let _ = api::set_storage(StorageFlags::empty(), key, value);
+}
+#[inline(always)]
+fn sget(key: &[u8], out: &mut [u8]) {
+    let mut slice = &mut out[..];
+    let _ = api::get_storage(StorageFlags::empty(), key, &mut slice);
 }
 
 // contract terminology:
@@ -48,11 +112,11 @@ fn pylon_level_key(pylon: &[u8; 20]) -> [u8; 32] {
 pub extern "C" fn deploy() {
     let mut implementation = [0u8; 20];
     api::call_data_copy(&mut implementation, 0);
-    api::set_storage(StorageFlags::empty(), &IMPLEMENTATION_KEY, &implementation);
+    sset(&IMPLEMENTATION_KEY, &implementation);
 
     let mut deployer = [0u8; 20];
     api::caller(&mut deployer);
-    api::set_storage(StorageFlags::empty(), &TEMPLAR_KEY, &deployer);
+    sset(&TEMPLAR_KEY, &deployer);
 }
 
 /// routes calls to proxy functions or delegates to implementation
@@ -78,13 +142,13 @@ fn propose_upgrade() {
     let mut new_impl = [0u8; 20];
     api::call_data_copy(&mut new_impl, 12);
 
-    api::set_storage(StorageFlags::empty(), &UPGRADE_YES_WEIGHT_KEY, &[0u8; 2]);
-    api::set_storage(StorageFlags::empty(), &UPGRADE_NO_WEIGHT_KEY, &[0u8; 2]);
-    api::set_storage(StorageFlags::empty(), &PENDING_IMPL_KEY, &new_impl);
+    sset(&UPGRADE_YES_WEIGHT_KEY, &[0u8; 2]);
+    sset(&UPGRADE_NO_WEIGHT_KEY, &[0u8; 2]);
+    sset(&PENDING_IMPL_KEY, &new_impl);
 
     let mut timestamp = [0u8; 32];
     api::now(&mut timestamp);
-    api::set_storage(StorageFlags::empty(), &UPGRADE_PROPOSAL_KEY, &timestamp[..8]);
+    sset(&UPGRADE_PROPOSAL_KEY, &timestamp[..8]);
 
     api::return_value(ReturnFlags::empty(), &[]);
 }
@@ -96,39 +160,36 @@ fn vote_upgrade() {
     let support = input[31] != 0;
 
     let mut pending = [0u8; 20];
-    api::get_storage(StorageFlags::empty(), &PENDING_IMPL_KEY, &mut pending);
+    sget(&PENDING_IMPL_KEY, &mut pending);
 
     if pending == [0u8; 20] {
         api::return_value(ReturnFlags::REVERT, b"no pending upgrade");
-        return;
     }
 
     let mut caller = [0u8; 20];
     api::caller(&mut caller);
 
     let mut existing_vote = [0u8; 1];
-    api::get_storage(StorageFlags::empty(), &upgrade_vote_key(&caller), &mut existing_vote);
+    sget(&upgrade_vote_key(&caller), &mut existing_vote);
 
     if existing_vote[0] != 0 {
         api::return_value(ReturnFlags::REVERT, b"already voted");
-        return;
     }
 
     let weight = get_voter_weight(&caller);
 
     if weight == 0 {
         api::return_value(ReturnFlags::REVERT, b"not authorized");
-        return;
     }
 
-    api::set_storage(StorageFlags::empty(), &upgrade_vote_key(&caller), &[support as u8 + 1]);
+    sset(&upgrade_vote_key(&caller), &[support as u8 + 1]);
 
     let weight_key = if support { UPGRADE_YES_WEIGHT_KEY } else { UPGRADE_NO_WEIGHT_KEY };
     let mut tally_bytes = [0u8; 2];
-    api::get_storage(StorageFlags::empty(), &weight_key, &mut tally_bytes);
+    sget(&weight_key, &mut tally_bytes);
     let mut tally = u16::from_le_bytes(tally_bytes);
     tally += weight as u16;
-    api::set_storage(StorageFlags::empty(), &weight_key, &tally.to_le_bytes());
+    sset(&weight_key, &tally.to_le_bytes());
 
     let mut output = [0u8; 32];
     output[30..32].copy_from_slice(&tally.to_le_bytes());
@@ -138,45 +199,42 @@ fn vote_upgrade() {
 /// executes upgrade if 2/3 majority reached and timelock passed
 fn execute_upgrade() {
     let mut pending = [0u8; 20];
-    api::get_storage(StorageFlags::empty(), &PENDING_IMPL_KEY, &mut pending);
+    sget(&PENDING_IMPL_KEY, &mut pending);
 
     if pending == [0u8; 20] {
         api::return_value(ReturnFlags::REVERT, b"no pending upgrade");
-        return;
     }
 
     let mut yes_bytes = [0u8; 2];
-    api::get_storage(StorageFlags::empty(), &UPGRADE_YES_WEIGHT_KEY, &mut yes_bytes);
+    sget(&UPGRADE_YES_WEIGHT_KEY, &mut yes_bytes);
     let yes_weight = u16::from_le_bytes(yes_bytes);
 
     let mut no_bytes = [0u8; 2];
-    api::get_storage(StorageFlags::empty(), &UPGRADE_NO_WEIGHT_KEY, &mut no_bytes);
+    sget(&UPGRADE_NO_WEIGHT_KEY, &mut no_bytes);
     let no_weight = u16::from_le_bytes(no_bytes);
 
     let total = yes_weight + no_weight;
     if total == 0 || (yes_weight * 3) < (total * 2) {
         api::return_value(ReturnFlags::REVERT, b"need 2/3 majority");
-        return;
     }
 
     let mut templar = [0u8; 20];
-    api::get_storage(StorageFlags::empty(), &TEMPLAR_KEY, &mut templar);
+    sget(&TEMPLAR_KEY, &mut templar);
 
     let mut caller = [0u8; 20];
     api::caller(&mut caller);
 
     // templar can bypass timelock
     if templar != [0u8; 20] && caller == templar {
-        api::set_storage(StorageFlags::empty(), &IMPLEMENTATION_KEY, &pending);
-        api::set_storage(StorageFlags::empty(), &PENDING_IMPL_KEY, &[0u8; 20]);
-        api::set_storage(StorageFlags::empty(), &UPGRADE_YES_WEIGHT_KEY, &[0u8; 2]);
-        api::set_storage(StorageFlags::empty(), &UPGRADE_NO_WEIGHT_KEY, &[0u8; 2]);
+        sset(&IMPLEMENTATION_KEY, &pending);
+        sset(&PENDING_IMPL_KEY, &[0u8; 20]);
+        sset(&UPGRADE_YES_WEIGHT_KEY, &[0u8; 2]);
+        sset(&UPGRADE_NO_WEIGHT_KEY, &[0u8; 2]);
         api::return_value(ReturnFlags::empty(), &[1u8]);
-        return;
     }
 
     let mut proposal_time = [0u8; 8];
-    api::get_storage(StorageFlags::empty(), &UPGRADE_PROPOSAL_KEY, &mut proposal_time);
+    sget(&UPGRADE_PROPOSAL_KEY, &mut proposal_time);
     let proposal_timestamp = u64::from_le_bytes(proposal_time);
 
     let mut current_time = [0u8; 32];
@@ -187,13 +245,12 @@ fn execute_upgrade() {
 
     if current_timestamp < proposal_timestamp + 172800 {
         api::return_value(ReturnFlags::REVERT, b"48h delay required");
-        return;
     }
 
-    api::set_storage(StorageFlags::empty(), &IMPLEMENTATION_KEY, &pending);
-    api::set_storage(StorageFlags::empty(), &PENDING_IMPL_KEY, &[0u8; 20]);
-    api::set_storage(StorageFlags::empty(), &UPGRADE_YES_WEIGHT_KEY, &[0u8; 2]);
-    api::set_storage(StorageFlags::empty(), &UPGRADE_NO_WEIGHT_KEY, &[0u8; 2]);
+    sset(&IMPLEMENTATION_KEY, &pending);
+    sset(&PENDING_IMPL_KEY, &[0u8; 20]);
+    sset(&UPGRADE_YES_WEIGHT_KEY, &[0u8; 2]);
+    sset(&UPGRADE_NO_WEIGHT_KEY, &[0u8; 2]);
 
     api::return_value(ReturnFlags::empty(), &[1u8]);
 }
@@ -201,24 +258,23 @@ fn execute_upgrade() {
 /// removes templar privileges permanently
 fn remove_templar() {
     let mut templar = [0u8; 20];
-    api::get_storage(StorageFlags::empty(), &TEMPLAR_KEY, &mut templar);
+    sget(&TEMPLAR_KEY, &mut templar);
 
     let mut caller = [0u8; 20];
     api::caller(&mut caller);
 
     if caller != templar {
         api::return_value(ReturnFlags::REVERT, b"not templar");
-        return;
     }
 
-    api::set_storage(StorageFlags::empty(), &TEMPLAR_KEY, &[0u8; 20]);
+    sset(&TEMPLAR_KEY, &[0u8; 20]);
     api::return_value(ReturnFlags::empty(), &[]);
 }
 
 /// returns current implementation address
 fn get_implementation() {
     let mut implementation = [0u8; 20];
-    api::get_storage(StorageFlags::empty(), &IMPLEMENTATION_KEY, &mut implementation);
+    sget(&IMPLEMENTATION_KEY, &mut implementation);
 
     let mut output = [0u8; 32];
     output[12..32].copy_from_slice(&implementation);
@@ -228,7 +284,7 @@ fn get_implementation() {
 /// returns pending upgrade implementation address
 fn get_pending_upgrade() {
     let mut pending = [0u8; 20];
-    api::get_storage(StorageFlags::empty(), &PENDING_IMPL_KEY, &mut pending);
+    sget(&PENDING_IMPL_KEY, &mut pending);
 
     let mut output = [0u8; 32];
     output[12..32].copy_from_slice(&pending);
@@ -238,8 +294,8 @@ fn get_pending_upgrade() {
 /// queries implementation for voter weight based on level
 fn get_voter_weight(voter: &[u8; 20]) -> u8 {
     let mut level = [0u8; 1];
-    api::get_storage(StorageFlags::empty(), &pylon_level_key(voter), &mut level);
-    
+    sget(&pylon_level_key(voter), &mut level);
+
     match level[0] {
         5 => 1,
         6 => 2,
@@ -251,14 +307,13 @@ fn get_voter_weight(voter: &[u8; 20]) -> u8 {
 /// delegates all other calls to implementation contract
 fn delegate_to_implementation() {
     let mut implementation = [0u8; 20];
-    api::get_storage(StorageFlags::empty(), &IMPLEMENTATION_KEY, &mut implementation);
+    sget(&IMPLEMENTATION_KEY, &mut implementation);
 
     let data_len = api::call_data_size() as usize;
     const MAX_DATA: usize = 8192;
 
     if data_len > MAX_DATA {
         api::return_value(ReturnFlags::REVERT, b"data too large");
-        return;
     }
 
     let mut data_buf = [0u8; MAX_DATA];
@@ -275,9 +330,10 @@ fn delegate_to_implementation() {
         0,
         &[0u8; 32],
         data,
-        Some(&mut output)
+        Some(&mut output),
     ) {
         Ok(()) => api::return_value(ReturnFlags::empty(), output),
         Err(_) => api::return_value(ReturnFlags::REVERT, &[]),
     }
 }
+
