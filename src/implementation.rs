@@ -943,7 +943,7 @@ fn report_probe_data() {
     report_data[32] = status_code;
     sset(&probe_report_key(&pylon, window, &caller), &report_data);
 
-    // Simplified window data: [count, healthy_count, degraded_count, error_count]
+    // simplified window data: [count, healthy_count, degraded_count, error_count]
     let mut wdata = [0u8; 4];
     sget(&probe_window_key(&pylon, window), &mut wdata);
 
@@ -952,7 +952,7 @@ fn report_probe_data() {
     if status_code < 128 {
         wdata[1] = wdata[1].saturating_add(1); // healthy count
     } else if status_code < 200 {
-        wdata[2] = wdata[2].saturating_add(1); // degraded count  
+        wdata[2] = wdata[2].saturating_add(1); // degraded count
     } else {
         wdata[3] = wdata[3].saturating_add(1); // error count
     }
@@ -1001,6 +1001,7 @@ fn finalize_window() {
     let degraded_count = wdata[2];
     let _error_count = wdata[3];
 
+    // mark as insufficient data if not enough probes
     if total_count < MIN_PROBES_FOR_CONSENSUS {
         sset(&pylon_status_key(&pylon), &[2u8]); // insufficient data
         sset(&window_finalized_key(&pylon, window), &[1u8]);
@@ -1022,7 +1023,7 @@ fn finalize_window() {
 
     sset(&pylon_status_key(&pylon), &[status]);
 
-    // Store simple metrics: status, counts, window
+    // store simple metrics: status, counts, window
     let mut metrics = [0u8; 8];
     metrics[0] = status;
     metrics[1] = total_count;
@@ -1030,8 +1031,8 @@ fn finalize_window() {
     metrics[3] = degraded_count;
     metrics[4..8].copy_from_slice(&window.to_le_bytes());
     
-    sset(&pylon_metrics_key(&pylon), &metrics);
-    sset(&probe_window_key(&pylon, window), &[0u8; 4]); // clear accumulator
+    sset(&pylon_metrics_key(&pylon), &metrics);          // store metrics
+    sset(&probe_window_key(&pylon, window), &[0u8; 4]);  // clear accumulator
     sset(&window_finalized_key(&pylon, window), &[1u8]); // mark finalized
 
     let mut out = [0u8; 32];
