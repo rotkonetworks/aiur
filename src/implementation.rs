@@ -71,12 +71,10 @@ mod alloc_support {
 // tiny adapters for storage apis
 #[inline(always)]
 fn sset(key: &[u8], value: &[u8]) {
-    // ignore returned size of previous value
     let _ = api::set_storage(StorageFlags::empty(), key, value);
 }
 #[inline(always)]
 fn sget(key: &[u8], out: &mut [u8]) {
-    // leave `out` zeroed if the key is missing or shorter than `out`
     let mut slice = &mut out[..];
     let _ = api::get_storage(StorageFlags::empty(), key, &mut slice);
 }
@@ -119,7 +117,6 @@ const PROPOSAL_EXECUTED_PREFIX: u8 = 0x40;
 
 // monitoring constants
 const REPORT_INTERVAL: u64 = 300;
-const DEGRADATION_THRESHOLD: u8 = 95;
 const MIN_PROBES_FOR_CONSENSUS: u8 = 3;
 
 // ---- key helpers ----
@@ -259,6 +256,33 @@ fn probe_report_key(pylon: &[u8; 20], window: u32, probe: &[u8; 20]) -> [u8; 32]
     key
 }
 
+/// returns a pylon's status key
+#[inline(always)]
+fn pylon_status_key(pylon: &[u8; 20]) -> [u8; 32] {
+    let mut key = [0u8; 32];
+    key[0] = PYLON_STATUS_PREFIX;
+    key[1..21].copy_from_slice(pylon);
+    key
+}
+
+/// returns pylon's metrics key
+#[inline(always)]
+fn pylon_metrics_key(pylon: &[u8; 20]) -> [u8; 32] {
+    let mut key = [0u8; 32];
+    key[0] = PYLON_METRICS_PREFIX;
+    key[1..21].copy_from_slice(pylon);
+    key
+}
+
+/// returns probe's whitelist key
+#[inline(always)]
+fn probe_whitelist_key(probe: &[u8; 20]) -> [u8; 32] {
+    let mut key = [0u8; 32];
+    key[0] = PROBE_WHITELIST_PREFIX;
+    key[1..21].copy_from_slice(probe);
+    key
+}
+
 #[no_mangle]
 #[polkavm_derive::polkavm_export]
 pub extern "C" fn deploy() {
@@ -296,7 +320,7 @@ pub extern "C" fn call() {
     let s_get_pylon_level = sel("getPylonLevel(address)");
     let s_get_pylon_status = sel("getPylonStatus(address)");
     let s_get_pylon_metrics = sel("getPylonMetrics(address)");
-    let s_report_probe_data = sel("reportProbeData(address,uint32,uint16,uint8)");
+    let s_report_probe_data = sel("reportProbeData(address,bytes32,uint8)");
     let s_finalize_window = sel("finalizeWindow(address,uint32)");
 
     match selector {
@@ -311,7 +335,7 @@ pub extern "C" fn call() {
         x if x == s_whitelist_probe => whitelist_probe(),
         x if x == s_revoke_probe => revoke_probe(),
         x if x == s_is_probe_whitelisted => is_probe_whitelisted(),
-        x if x == s_propose => propose(), // will revert to enforce typed proposes
+        x if x == s_propose => propose(),
         x if x == s_vote => vote(),
         x if x == s_execute_proposal => execute_proposal(),
         x if x == s_get_network_info => get_network_info(),
@@ -394,14 +418,14 @@ fn set_network_dns() {
     api::return_value(ReturnFlags::empty(), &[]);
 }
 
-/// adds a pylon to a network; caller must be a level 5+ pylon of that network; validates network existence
+/// adds a pylon to a network; caller must be a level 5+ pylon of that network
 fn add_pylon() {
     let mut input = [0u8; 64]; // 2 slots
     api::call_data_copy(&mut input, 4);
 
     let network_id = u32::from_be_bytes([input[28], input[29], input[30], input[31]]);
     let mut new_pylon = [0u8; 20];
-    new_pylon.copy_from_slice(&input[44..64]); // address is last 20 bytes of slot #1
+    new_pylon.copy_from_slice(&input[44..64]);
 
     // ensure network exists
     let mut net_data = [0u8; 1];
@@ -437,7 +461,7 @@ fn remove_pylon() {
 ///
 /// returns: `uint32 proposal_id`
 fn set_pylon_org() {
-    let mut input = [0u8; 64]; // 2 slots (address, uint8)
+    let mut input = [0u8; 64];
     api::call_data_copy(&mut input, 4);
 
     let mut pylon = [0u8; 20];
@@ -455,15 +479,15 @@ fn set_pylon_org() {
 ///
 /// returns: `uint32 proposal_id`
 fn set_pylon_level() {
-    let mut input = [0u8; 64]; // 2 slots (address, uint8)
+    let mut input = [0u8; 64];
     api::call_data_copy(&mut input, 4);
 
     let mut pylon = [0u8; 20];
     pylon.copy_from_slice(&input[12..32]);
     let new_level = input[63];
 
-    if new_level > 7 {
-        api::return_value(ReturnFlags::REVERT, b"max level 7");
+    if new_level > 9 {
+        api::return_value(ReturnFlags::REVERT, b"max level 9");
     }
 
     create_proposal(1, &pylon, new_level);
@@ -473,7 +497,7 @@ fn set_pylon_level() {
 ///
 /// returns: `uint32 proposal_id`
 fn set_dns_controller() {
-    let mut input = [0u8; 64]; // 2 slots (uint8, address)
+    let mut input = [0u8; 64];
     api::call_data_copy(&mut input, 4);
 
     let org_id = input[31];
@@ -529,7 +553,7 @@ fn create_proposal(proposal_type: u8, target: &[u8; 20], value: u8) {
     let mut count = u32::from_le_bytes(count_bytes);
     count = count.saturating_add(1);
 
-    // meta: [0]=type, [1..21]=proposer, [31] unused
+    // meta: [0]=type, [1..21]=proposer
     let mut meta = [0u8; 32];
     meta[0] = proposal_type;
     meta[1..21].copy_from_slice(&caller);
@@ -548,16 +572,16 @@ fn create_proposal(proposal_type: u8, target: &[u8; 20], value: u8) {
     api::return_value(ReturnFlags::empty(), &out);
 }
 
-/// generic propose entrypoint is disabled to avoid abi misuse; use typed propose functions
+/// generic propose entrypoint is disabled to avoid abi misuse
 fn propose() {
     api::return_value(ReturnFlags::REVERT, b"use typed propose");
 }
 
-/// casts a vote on a proposal; equal weight for levels 5..7; one vote per address
+/// casts a vote on a proposal; equal weight for levels 5..7
 ///
 /// returns: `uint16 tally_for_side`
 fn vote() {
-    let mut input = [0u8; 64]; // 2 slots (uint32, bool)
+    let mut input = [0u8; 64];
     api::call_data_copy(&mut input, 4);
 
     let proposal_id = u32::from_be_bytes([input[28], input[29], input[30], input[31]]);
@@ -592,7 +616,7 @@ fn vote() {
     api::return_value(ReturnFlags::empty(), &out);
 }
 
-/// executes a proposal if a 2/3 majority is met and the proposal is not already executed
+/// executes a proposal if a 2/3 majority is met
 fn execute_proposal() {
     let mut input = [0u8; 32];
     api::call_data_copy(&mut input, 4);
@@ -792,7 +816,7 @@ fn get_pylon_level() {
 
 /// returns a pylon's current status
 ///
-/// status: 0 healthy, 1 degraded, 2 insufficient reports
+/// status: 0 healthy, 1 degraded, 2 insufficient reports, 128+ errors
 ///
 /// returns: `uint8 status`
 fn get_pylon_status() {
@@ -810,20 +834,9 @@ fn get_pylon_status() {
     api::return_value(ReturnFlags::empty(), &out);
 }
 
-/// returns a pylon's status key
-#[inline(always)]
-fn pylon_status_key(pylon: &[u8; 20]) -> [u8; 32] {
-    let mut key = [0u8; 32];
-    key[0] = PYLON_STATUS_PREFIX;
-    key[1..21].copy_from_slice(pylon);
-    key
-}
-
 /// returns aggregated pylon metrics for the last finalized window
 ///
-/// fields: uptime (uint8), latency (uint16), regions (uint32 bitset), window (uint32), report_count (uint8)
-///
-/// returns: `(uint8 uptime, uint16 latency, uint32 regions, uint32 window, uint8 report_count)`
+/// returns: `(uint8 status, uint16 avg_latency, uint8 total_count, uint8 healthy_count, uint32 window)`
 fn get_pylon_metrics() {
     let mut input = [0u8; 32];
     api::call_data_copy(&mut input, 4);
@@ -831,25 +844,16 @@ fn get_pylon_metrics() {
     let mut pylon = [0u8; 20];
     pylon.copy_from_slice(&input[12..32]);
 
-    let mut m = [0u8; 16];
+    let mut m = [0u8; 10];
     sget(&pylon_metrics_key(&pylon), &mut m);
 
     let mut out = [0u8; 160]; // 5 slots
-    out[31] = m[0];                        // uint8 uptime
-    out[62..64].copy_from_slice(&m[1..3]); // uint16 latency
-    out[92..96].copy_from_slice(&m[3..7]); // uint32 regions
-    out[124..128].copy_from_slice(&m[7..11]); // uint32 window
-    out[159] = m[11];                      // uint8 report_count
+    out[31] = m[0];                        // status
+    out[62..64].copy_from_slice(&m[1..3]); // avg_latency
+    out[95] = m[3];                        // total_count
+    out[127] = m[4];                       // healthy_count
+    out[156..160].copy_from_slice(&m[6..10]); // window
     api::return_value(ReturnFlags::empty(), &out);
-}
-
-/// returns pylon's metrics key
-#[inline(always)]
-fn pylon_metrics_key(pylon: &[u8; 20]) -> [u8; 32] {
-    let mut key = [0u8; 32];
-    key[0] = PYLON_METRICS_PREFIX;
-    key[1..21].copy_from_slice(pylon);
-    key
 }
 
 /// checks whether a probe is whitelisted
@@ -870,30 +874,22 @@ fn is_probe_whitelisted() {
     api::return_value(ReturnFlags::empty(), &out);
 }
 
-/// returns probe's whitelist key
-#[inline(always)]
-fn probe_whitelist_key(probe: &[u8; 20]) -> [u8; 32] {
-    let mut key = [0u8; 32];
-    key[0] = PROBE_WHITELIST_PREFIX;
-    key[1..21].copy_from_slice(probe);
-    key
-}
-
-/// records a probe report for a pylon within the current window (one per probe per window)
+/// records probe report: hash (32 bytes) + status (1 byte)
+/// status codes: 0-127 healthy, 128-255 errors
 ///
-/// args: (address pylon, uint32 regions, uint16 latency, uint8 uptime)
-///
+/// args: (address pylon, bytes32 reportHash, uint8 statusCode)
 /// returns: `uint32 window`
 fn report_probe_data() {
-    let mut input = [0u8; 128]; // 4 slots
+    let mut input = [0u8; 96]; // 3 slots
     api::call_data_copy(&mut input, 4);
 
     let mut pylon = [0u8; 20];
     pylon.copy_from_slice(&input[12..32]);
-
-    let regions = u32::from_be_bytes([input[60], input[61], input[62], input[63]]);
-    let latency = u16::from_be_bytes([input[94], input[95]]);
-    let uptime = input[127];
+    
+    let mut report_hash = [0u8; 32];
+    report_hash.copy_from_slice(&input[36..68]); // slot 1
+    
+    let status_code = input[95]; // slot 2
 
     let mut caller = [0u8; 20];
     api::caller(&mut caller);
@@ -917,32 +913,33 @@ fn report_probe_data() {
     let now = u64::from_le_bytes(lo);
     let window = (now / REPORT_INTERVAL) as u32;
 
-    // enforce one report per probe per window (collision-proof key)
+    // enforce one report per probe per window
     let mut reported = [0u8; 1];
     sget(&probe_report_key(&pylon, window, &caller), &mut reported);
     if reported[0] != 0 {
         api::return_value(ReturnFlags::REVERT, b"already reported");
     }
-    sset(&probe_report_key(&pylon, window, &caller), &[1u8]);
+    
+    // store hash and status (33 bytes total)
+    let mut report_data = [0u8; 33];
+    report_data[0..32].copy_from_slice(&report_hash);
+    report_data[32] = status_code;
+    sset(&probe_report_key(&pylon, window, &caller), &report_data);
 
-    // aggregate into window accumulator: [0]=count, [1..3]=sum uptime u16, [3..7]=sum latency u32, [7..11]=regions bitset u32
-    let mut wdata = [0u8; 12];
+    // Simplified window data: [count, healthy_count, degraded_count, error_count]
+    let mut wdata = [0u8; 4];
     sget(&probe_window_key(&pylon, window), &mut wdata);
 
-    let mut count = wdata[0];
-    let mut sum_uptime = u16::from_le_bytes([wdata[1], wdata[2]]);
-    let mut sum_latency = u32::from_le_bytes([wdata[3], wdata[4], wdata[5], wdata[6]]);
-    let mut regions_cov = u32::from_le_bytes([wdata[7], wdata[8], wdata[9], wdata[10]]);
-
-    count = count.saturating_add(1);
-    sum_uptime = sum_uptime.saturating_add(uptime as u16);
-    sum_latency = sum_latency.saturating_add(latency as u32);
-    regions_cov |= regions;
-
-    wdata[0] = count;
-    wdata[1..3].copy_from_slice(&sum_uptime.to_le_bytes());
-    wdata[3..7].copy_from_slice(&sum_latency.to_le_bytes());
-    wdata[7..11].copy_from_slice(&regions_cov.to_le_bytes());
+    wdata[0] = wdata[0].saturating_add(1); // total count
+    
+    if status_code < 128 {
+        wdata[1] = wdata[1].saturating_add(1); // healthy count
+    } else if status_code < 200 {
+        wdata[2] = wdata[2].saturating_add(1); // degraded count  
+    } else {
+        wdata[3] = wdata[3].saturating_add(1); // error count
+    }
+    
     sset(&probe_window_key(&pylon, window), &wdata);
 
     let mut out = [0u8; 32];
@@ -950,11 +947,11 @@ fn report_probe_data() {
     api::return_value(ReturnFlags::empty(), &out);
 }
 
-/// finalizes a window for a pylon; guarded to prevent duplicate finalizations; updates status and metrics
+/// finalizes window with 2/3 consensus requirement
 ///
 /// returns: `uint8 status`
 fn finalize_window() {
-    let mut input = [0u8; 64]; // 2 slots (address, uint32)
+    let mut input = [0u8; 64]; // 2 slots
     api::call_data_copy(&mut input, 4);
 
     let mut pylon = [0u8; 20];
@@ -979,39 +976,45 @@ fn finalize_window() {
         api::return_value(ReturnFlags::REVERT, b"already finalized");
     }
 
-    let mut wdata = [0u8; 12];
+    let mut wdata = [0u8; 4];
     sget(&probe_window_key(&pylon, window), &mut wdata);
 
-    let count = wdata[0];
+    let total_count = wdata[0];
+    let healthy_count = wdata[1];
+    let degraded_count = wdata[2];
+    let _error_count = wdata[3];
 
-    if count < MIN_PROBES_FOR_CONSENSUS {
-        sset(&pylon_status_key(&pylon), &[2u8]);
+    if total_count < MIN_PROBES_FOR_CONSENSUS {
+        sset(&pylon_status_key(&pylon), &[2u8]); // insufficient data
         sset(&window_finalized_key(&pylon, window), &[1u8]);
         let mut out = [0u8; 32];
         out[31] = 2;
         api::return_value(ReturnFlags::empty(), &out);
     }
 
-    let sum_uptime = u16::from_le_bytes([wdata[1], wdata[2]]);
-    let sum_latency = u32::from_le_bytes([wdata[3], wdata[4], wdata[5], wdata[6]]);
-    let regions = u32::from_le_bytes([wdata[7], wdata[8], wdata[9], wdata[10]]);
+    // 2/3 consensus for status determination
+    let consensus_threshold = (total_count * 2) / 3;
+    
+    let status = if healthy_count >= consensus_threshold {
+        0u8 // healthy
+    } else if (healthy_count + degraded_count) >= consensus_threshold {
+        1u8 // degraded (mixed results but mostly reachable)
+    } else {
+        128u8 // offline/error (majority reporting errors)
+    };
 
-    // integer averages
-    let avg_uptime = (sum_uptime / count as u16) as u8;
-    let avg_latency = (sum_latency / count as u32) as u16;
-
-    let status = if avg_uptime < DEGRADATION_THRESHOLD { 1u8 } else { 0u8 };
     sset(&pylon_status_key(&pylon), &[status]);
 
-    let mut metrics = [0u8; 16];
-    metrics[0] = avg_uptime;
-    metrics[1..3].copy_from_slice(&avg_latency.to_le_bytes());
-    metrics[3..7].copy_from_slice(&regions.to_le_bytes());
-    metrics[7..11].copy_from_slice(&window.to_le_bytes());
-    metrics[11] = count;
-
+    // Store simple metrics: status, counts, window
+    let mut metrics = [0u8; 8];
+    metrics[0] = status;
+    metrics[1] = total_count;
+    metrics[2] = healthy_count;
+    metrics[3] = degraded_count;
+    metrics[4..8].copy_from_slice(&window.to_le_bytes());
+    
     sset(&pylon_metrics_key(&pylon), &metrics);
-    sset(&probe_window_key(&pylon, window), &[0u8; 12]); // clear accumulator
+    sset(&probe_window_key(&pylon, window), &[0u8; 4]); // clear accumulator
     sset(&window_finalized_key(&pylon, window), &[1u8]); // mark finalized
 
     let mut out = [0u8; 32];
@@ -1019,10 +1022,10 @@ fn finalize_window() {
     api::return_value(ReturnFlags::empty(), &out);
 }
 
-/// vote weight calculation for governance (equal weights across ranks 5..7)
+/// vote weight calculation for governance (equal weights across ranks 5..9)
 fn calculate_vote_weight(level: u8) -> u8 {
     match level {
-        5 | 6 | 7 => 1,
+        5..=9 => 1,
         _ => 0,
     }
 }

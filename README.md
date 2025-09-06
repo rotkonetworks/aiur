@@ -1,90 +1,156 @@
-# Contract Rust Template
+# aiur
 
-This is a minimal template for a Rust contract targeting [`pallet_revive`](https://contracts.polkadot.io). This is a low-
-level way to write contracts, so we don't expect it to be used for implementing high-level contract logic. Instead, we expect
-that Rust will be used to implement libraries that are then called by Solidity, similar to Python, where performance-critical
-code is written in C.
+aiur is a smart contract system for the Infrastructure Builders' Program (IBP)
+that handles network governance, pylon management, and decentralized monitoring
+with on-chain SLA tracking.
 
-## Components
+## overview
 
-In terms of code, this template is very bare bones. `main.rs` is just a few lines of code. Most of the files in this repo
-deal with compiling the code to PolkaVM in a `rust-analyzer`-friendly way. We included a `.cargo/config.toml` so that all
-tools automatically select the correct target.
+the system consists of two contracts:
+- **controller (proxy)**: handles upgrades and delegation
+- **implementation**: core logic for IBP operations
 
-The `call_from_sol.sol` file demonstrates how to call the example in `main.rs` from Solidity.
+### key feats
 
-## Memory Allocation
+- **network management**: create and manage multiple networks with different level requirements
+- **pylon governance**: democratic voting for level changes, org assignments, and DNS control
+- **decentralized monitoring**: whitelisted probes report pylon health with hash-based verification
+- **SLA tracking**: onchain consensus for payment eligibility based on uptime
 
-The contract depends on the `pallet-revive-uapi` crate, which is a thin (but safe) wrapper around all available host functions. It only
-includes the absolute minimum. This means we also don't include a memory allocator. If you want to use `alloc`, you need to define
-a global allocator. Note that we don't support dynamic memory allocations in `pallet_revive` yet. Therefore, the allocator would need
-to operate on a static buffer.
+## architecture
 
-## How to Build
+### storage layout
+- shared prefix `0x10` for pylon levels (accessible by both contracts)
+- implementation uses `0x20-0x40` for its storage
+- controller uses `0xA1-0xA7` for upgrade management
 
-You can build this project with `cargo build`. However, to generate a valid contract, you also need to link it. Linking means taking the
-ELF file outputted by the Rust compiler and transforming it into a PolkaVM module.
+### monitoring system
+- probes report every 5 minutes (300 seconds)
+- each report contains: 32-byte IPFS hash + 1-byte status code
+- status codes: 0-127 (healthy), 128-255 (degraded/error)
+- 2/3 consensus required for window finalization
 
-```sh
-# Make sure to have the latest polkatool installed
-$ cargo install polkatool
+## building
 
-# This will build the project and then use polkatool to link it
-$ make
+```bash
+# install dependencies
+cargo install polkatool
+
+# build contracts
+make build
+
+# output files:
+# - controller.polkavm
+# - implementation.polkavm
 ```
 
-**The build result is placed as `contract.polkavm` in the repository root. This is the final artifact that can be deployed as-is.**
+## deployment
 
-## How to Deploy and Call
+```bash
+# deploy implementation first
+IMPL_ADDR=$(cast send --create "$(xxd -p -c 99999 implementation.polkavm)" \
+  --account dev --json | jq -r .contractAddress)
 
-The easiest way, is to use [cast](https://getfoundry.sh) from the Foundry test-suite.
+# deploy controller with implementation address
+CTRL_ADDR=$(cast send --create \
+  "0x$(xxd -p -c 99999 controller.polkavm)$(echo $IMPL_ADDR | cut -c3-)" \
+  --account dev --json | jq -r .contractAddress)
 
-```sh
-# Define the RPC URL (default to http://localhost:8545)
-export ETH_RPC_URL="https://westend-asset-hub-eth-rpc.polkadot.io"
-
-# Define the account that will use to call and deploy the contract
-# Make sure to fund the account with some tokens (e.g. using the faucet https://contracts.polkadot.io/connect-to-asset-hub)
-export ETH_FROM=0xf24FF3a9CF04c71Dbc94D0b566f7A27B94566cac
-cast wallet import dev-account --private-key 5fb92d6e98884f76de468fa3f6278f8807c48bebc13595d45af5bdc4da702133
-
-# Deploy the contract
-cast send --account dev-account --create "$(xxd -p -c 99999 contract.polkavm)"
-
-# output
-# ...
-# contractAddress      0xc01Ee7f10EA4aF4673cFff62710E1D7792aBa8f3
-# ...
-
-# or to get the address
-
-RUST_ADDRESS=$(cast send --account dev-account --create "$(xxd -p -c 99999 contract.polkavm)" --json | jq -r .contractAddress)
-
-# Call the contract
-cast call $RUST_ADDRESS "fibonacci(uint32) public pure returns (uint32)" "4"
-
-# Build the solidity contract
-npx @parity/revive@latest --bin call_from_sol.sol
-
-# Deploy the solidity contract
-SOL_ADDRESS=$(cast send --account dev-account --create "$(xxd -p -c 99999 call_from_sol_sol_CallRust.polkavm)" --json | jq -r .contractAddress)
-
-# Compare the gas estimates
-cast estimate $RUST_ADDRESS "fibonacci(uint32) public pure returns (uint32)" 4
-cast estimate $SOL_ADDRESS "fibonacci(uint32) public pure returns (uint32)" 4
-
-# Call the rust contract from solidity
-cast call $SOL_ADDRESS "fibonacciRust(uint32, address) external pure returns (uint32)" 4 $RUST_ADDRESS
+# all interactions go through the controller
+export CONTRACT=$CTRL_ADDR
 ```
 
-## How to Inspect the Contract
+## usage
 
-```sh
-polkatool stats contract.polkavm
-polkatool disassemble contract.polkavm
+### network operations
+
+```bash
+# create a network (requires level 5+)
+cast send $CONTRACT "createNetwork()"
+
+# add pylon to network
+cast send $CONTRACT "addPylon(uint32,address)" 1 0xPYLON_ADDRESS
+
+# set DNS for network
+cast send $CONTRACT "setNetworkDns(uint32,uint8,bool)" 1 1 true
 ```
 
-## Examples
+### governance
 
-The [test fixtures](https://github.com/paritytech/polkadot-sdk/tree/master/substrate/frame/revive/fixtures/contracts) for `pallet_revive` are
-written in the same way as this template and might be useful as examples.
+```bash
+# propose level change (creates proposal)
+cast send $CONTRACT "setPylonLevel(address,uint8)" 0xPYLON 6
+
+# vote on proposal
+cast send $CONTRACT "vote(uint32,bool)" 1 true
+
+# execute proposal (requires 2/3 majority)
+cast send $CONTRACT "executeProposal(uint32)" 1
+```
+
+### monitoring
+
+```bash
+# whitelist probe (via governance)
+cast send $CONTRACT "whitelistProbe(address)" 0xPROBE
+
+# report monitoring data (probe only)
+# statusCode: 0-127 healthy, 128-255 error
+cast send $CONTRACT "reportProbeData(address,bytes32,uint8)" \
+  0xPYLON 0xIPFS_HASH 0
+
+# finalize window (anyone can call after window ends)
+cast send $CONTRACT "finalizeWindow(address,uint32)" 0xPYLON 12345
+```
+
+### queries
+
+```bash
+# get pylon level
+cast call $CONTRACT "getPylonLevel(address)" 0xPYLON
+
+# get pylon status (0=healthy, 1=degraded, 2=insufficient, 128+=error)
+cast call $CONTRACT "getPylonStatus(address)" 0xPYLON
+
+# get network info
+cast call $CONTRACT "getNetworkInfo(uint32)" 1
+```
+
+## contract upgrades
+
+```bash
+# deploy new implementation
+NEW_IMPL=$(cast send --create "$(xxd -p -c 99999 new_impl.polkavm)" \
+  --json | jq -r .contractAddress)
+
+# propose upgrade (any level 5+)
+cast send $CONTRACT "proposeUpgrade(address)" $NEW_IMPL
+
+# vote on upgrade
+cast send $CONTRACT "voteUpgrade(bool)" true
+
+# execute upgrade (48h timelock unless templar)
+cast send $CONTRACT "executeUpgrade()"
+```
+
+## status code reference
+
+| range | meaning | description |
+|-------|---------|-------------|
+| 0-127 | healthy | node operational, can encode latency |
+| 128-199 | degraded | partially functional |
+| 200 | offline | node unreachable |
+| 201 | wrong chain | incorrect network |
+| 202 | not synced | node syncing |
+| 203 | no peers | insufficient connectivity |
+
+## security
+
+- upgrades require 2/3 majority vote from level 5+ pylons
+- 48-hour timelock on upgrades (templar can bypass once)
+- collision-resistant storage keys using keccak256
+- one report per probe per window enforcement
+
+## license
+
+Apache-2.0
