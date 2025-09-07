@@ -68,6 +68,10 @@ mod alloc_support {
     }
 }
 
+// NOTE: sget/sset use little-endian to_le_bytes()
+// while ABI return values big endian to_be_bytes()
+// and EventData big endian to_be_bytes()
+
 // ---- tiny adapters for new uapi storage signatures ----
 #[inline(always)]
 fn sset(key: &[u8], value: &[u8]) {
@@ -116,6 +120,73 @@ fn sel(signature: &str) -> [u8; 4] {
     let mut h = [0u8; 32];
     api::hash_keccak_256(signature.as_bytes(), &mut h);
     [h[0], h[1], h[2], h[3]]
+}
+
+// ---- evm event emission helpers ----
+
+/// emits UpgradeProposed(address indexed proposer, address indexed newImplementation, uint256 timestamp)
+fn emit_upgrade_proposed(proposer: &[u8; 20], new_impl: &[u8; 20]) {
+    let mut topic0 = [0u8; 32]; // event signature
+    let sig = sel("UpgradeProposed(address,address,uint256)");
+    topic0[0..4].copy_from_slice(&sig);
+    
+    let mut topic1 = [0u8; 32]; // proposer (indexed)
+    topic1[12..32].copy_from_slice(proposer);
+    
+    let mut topic2 = [0u8; 32]; // newImplementation (indexed)
+    topic2[12..32].copy_from_slice(new_impl);
+    
+    let mut data = [0u8; 32]; // timestamp
+    api::now(&mut data);
+    
+    let topics = [topic0, topic1, topic2];
+    api::deposit_event(&topics, &data);
+}
+
+/// emits UpgradeVoted(address indexed voter, bool support, uint16 weight)
+fn emit_upgrade_voted(voter: &[u8; 20], support: bool, weight: u16) {
+    let mut topic0 = [0u8; 32]; // event signature
+    let sig = sel("UpgradeVoted(address,bool,uint16)");
+    topic0[0..4].copy_from_slice(&sig);
+    
+    let mut topic1 = [0u8; 32]; // voter (indexed)
+    topic1[12..32].copy_from_slice(voter);
+    
+    let mut data = [0u8; 64];
+    data[31] = support as u8;
+    data[62..64].copy_from_slice(&weight.to_be_bytes());
+    
+    let topics = [topic0, topic1];
+    api::deposit_event(&topics, &data);
+}
+
+/// emits UpgradeExecuted(address indexed oldImplementation, address indexed newImplementation)
+fn emit_upgrade_executed(old_impl: &[u8; 20], new_impl: &[u8; 20]) {
+    let mut topic0 = [0u8; 32]; // event signature
+    let sig = sel("UpgradeExecuted(address,address)");
+    topic0[0..4].copy_from_slice(&sig);
+    
+    let mut topic1 = [0u8; 32]; // oldImplementation (indexed)
+    topic1[12..32].copy_from_slice(old_impl);
+    
+    let mut topic2 = [0u8; 32]; // newImplementation (indexed)
+    topic2[12..32].copy_from_slice(new_impl);
+    
+    let topics = [topic0, topic1, topic2];
+    api::deposit_event(&topics, &[]);
+}
+
+/// emits TemplarRemoved(address indexed templar)
+fn emit_templar_removed(templar: &[u8; 20]) {
+    let mut topic0 = [0u8; 32]; // event signature
+    let sig = sel("TemplarRemoved(address)");
+    topic0[0..4].copy_from_slice(&sig);
+    
+    let mut topic1 = [0u8; 32];
+    topic1[12..32].copy_from_slice(templar);
+    
+    let topics = [topic0, topic1];
+    api::deposit_event(&topics, &[]);
 }
 
 /// initializes proxy with implementation address and deployer as templar
@@ -168,6 +239,9 @@ fn propose_upgrade() {
     // address is at slot #0 => bytes [16..36) after selector
     api::call_data_copy(&mut new_impl, 16);
 
+    let mut caller = [0u8; 20];
+    api::caller(&mut caller);
+
     // reset tallies and store pending impl
     sset(&UPGRADE_YES_WEIGHT_KEY, &[0u8; 2]);
     sset(&UPGRADE_NO_WEIGHT_KEY, &[0u8; 2]);
@@ -178,6 +252,7 @@ fn propose_upgrade() {
     api::now(&mut timestamp);
     sset(&UPGRADE_PROPOSAL_KEY, &timestamp[..8]);
 
+    emit_upgrade_proposed(&caller, &new_impl);
     api::return_value(ReturnFlags::empty(), &[]);
 }
 
@@ -222,8 +297,10 @@ fn vote_upgrade() {
     tally = tally.saturating_add(weight as u16);
     sset(&key, &tally.to_le_bytes());
 
+    emit_upgrade_voted(&caller, support, tally);
+
     let mut out = [0u8; 32];
-    out[30..32].copy_from_slice(&tally.to_le_bytes());
+    out[30..32].copy_from_slice(&tally.to_be_bytes());
     api::return_value(ReturnFlags::empty(), &out);
 }
 
@@ -258,11 +335,15 @@ fn execute_upgrade() {
     let mut caller = [0u8; 20];
     api::caller(&mut caller);
 
+    let mut old_impl = [0u8; 20];
+    sget(&IMPLEMENTATION_KEY, &mut old_impl);
+
     if templar != [0u8; 20] && caller == templar {
         sset(&IMPLEMENTATION_KEY, &pending);
         sset(&PENDING_IMPL_KEY, &[0u8; 20]);
         sset(&UPGRADE_YES_WEIGHT_KEY, &[0u8; 2]);
         sset(&UPGRADE_NO_WEIGHT_KEY, &[0u8; 2]);
+        emit_upgrade_executed(&old_impl, &pending);
         api::return_value(ReturnFlags::empty(), &[1u8]);
     }
 
@@ -286,6 +367,7 @@ fn execute_upgrade() {
     sset(&UPGRADE_YES_WEIGHT_KEY, &[0u8; 2]);
     sset(&UPGRADE_NO_WEIGHT_KEY, &[0u8; 2]);
 
+    emit_upgrade_executed(&old_impl, &pending);
     api::return_value(ReturnFlags::empty(), &[1u8]);
 }
 
@@ -302,6 +384,7 @@ fn remove_templar() {
     }
 
     sset(&TEMPLAR_KEY, &[0u8; 20]);
+    emit_templar_removed(&templar);
     api::return_value(ReturnFlags::empty(), &[]);
 }
 
