@@ -1,8 +1,8 @@
 # aiur
 
 aiur is a smart contract system for the Infrastructure Builders' Program (IBP)
-that handles network governance, pylon management, and decentralized monitoring
-with on-chain SLA tracking.
+that handles network governance, member management and decentralized monitoring
+with on-chain verified SLA tracking.
 
 ## overview
 
@@ -13,7 +13,7 @@ the system consists of two contracts:
 ### key feats
 
 - **network management**: create and manage multiple networks with different level requirements
-- **pylon governance**: democratic voting for level changes, org assignments, and DNS control
+- **member governance**: democratic voting for level changes, org assignments, and DNS control
 - **decentralized monitoring**: whitelisted probes report pylon health with hash-based verification
 - **SLA tracking**: onchain consensus for payment eligibility based on uptime
 
