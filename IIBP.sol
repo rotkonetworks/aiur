@@ -2,6 +2,12 @@
 pragma solidity ^0.8.0;
 
 interface IIBPProxy {
+    // Events
+    event UpgradeProposed(address indexed proposer, address indexed newImplementation, uint256 timestamp);
+    event UpgradeVoted(address indexed voter, bool support, uint16 weight);
+    event UpgradeExecuted(address indexed oldImplementation, address indexed newImplementation);
+    event TemplarRemoved(address indexed templar);
+    
     // Proxy functions
     function proposeUpgrade(address newImplementation) external;
     function voteUpgrade(bool support) external returns (uint16 totalWeight);
@@ -12,6 +18,24 @@ interface IIBPProxy {
 }
 
 interface IIBPImplementation {
+    // Events
+    event NetworkCreated(uint32 indexed networkId, address indexed creator, uint8 levelRequirement);
+    event NetworkDnsUpdated(uint32 indexed networkId, uint8 indexed orgId, bool enabled);
+    event PylonAdded(uint32 indexed networkId, address indexed pylon);
+    event ProposalCreated(uint32 indexed proposalId, address indexed proposer, uint8 proposalType);
+    event ProposalVoted(uint32 indexed proposalId, address indexed voter, bool support, uint16 weight);
+    event ProposalExecuted(uint32 indexed proposalId, address indexed executor);
+    event PylonLevelChanged(address indexed pylon, uint8 oldLevel, uint8 newLevel);
+    event PylonOrgChanged(address indexed pylon, uint8 orgId);
+    event DnsControllerChanged(uint8 indexed orgId, address indexed controller);
+    event ProbeWhitelisted(address indexed probe);
+    event ProbeRevoked(address indexed probe);
+    event ProbeDataReported(address indexed pylon, address indexed probe, uint32 window, bytes32 reportHash, uint8 statusCode);
+    event WindowFinalized(address indexed pylon, uint32 indexed window, uint8 status, uint8 totalCount);
+    
+    // Bootstrap
+    function bootstrap() external;
+    
     // Network management
     function createNetwork() external returns (uint32 networkId);
     function setNetworkDns(uint32 networkId, uint8 orgId, bool enabled) external;
@@ -50,19 +74,18 @@ interface IIBPImplementation {
     function getPylonLevel(address pylon) external view returns (uint8);
     function getPylonStatus(address pylon) external view returns (uint8);
     function getPylonMetrics(address pylon) external view returns (
-        uint8 uptime,
-        uint16 latency,
-        uint32 regions,
-        uint32 window,
-        uint8 reportCount
+        uint8 status,
+        uint16 avgLatency,
+        uint8 totalCount,
+        uint8 healthyCount,
+        uint32 window
     );
     
     // Monitoring
     function reportProbeData(
         address pylon,
-        uint32 regions,
-        uint16 latency,
-        uint8 uptime
+        bytes32 reportHash,
+        uint8 statusCode
     ) external returns (uint32 window);
     function finalizeWindow(address pylon, uint32 window) external returns (uint8 status);
 }
