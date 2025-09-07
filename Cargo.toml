@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-uapi = { package = "pallet-revive-uapi", path = "../polkadot-sdk/substrate/frame/revive/uapi" }
+uapi = { package = "pallet-revive-uapi", version = "0.6", default-features = false }
 polkavm-derive = "0.29.0"
 
 [[bin]]
