@@ -105,12 +105,14 @@ const UPGRADE_YES_WEIGHT_KEY: [u8; 32] = [0xA4; 32];
 const UPGRADE_NO_WEIGHT_KEY: [u8; 32] = [0xA5; 32];
 const TEMPLAR_KEY: [u8; 32] = [0xA7; 32];
 const UPGRADE_VOTE_PREFIX: u8 = 0xA6;
+const UPGRADE_ID_KEY: [u8; 32] = [0xA8; 32];
 
-/// generates per-voter key for controller upgrade votes
-fn upgrade_vote_key(voter: &[u8; 20]) -> [u8; 32] {
+/// generates per-voter key for controller upgrade votes (versioned by proposal ID)
+fn upgrade_vote_key(upgrade_id: u32, voter: &[u8; 20]) -> [u8; 32] {
    let mut key = [0u8; 32];
    key[0] = UPGRADE_VOTE_PREFIX;
-   key[1..21].copy_from_slice(voter);
+   key[1..5].copy_from_slice(&upgrade_id.to_le_bytes());
+   key[5..25].copy_from_slice(voter);
    key
 }
 
@@ -189,12 +191,20 @@ fn emit_templar_removed(templar: &[u8; 20]) {
 #[no_mangle]
 #[polkavm_derive::polkavm_export]
 pub extern "C" fn deploy() {
-   // deploy with empty implementation, will be set via separate init call
    let mut deployer = [0u8; 20];
    api::caller(&mut deployer);
    sset(&TEMPLAR_KEY, &deployer);
-   // leave implementation empty for now
-   sset(&IMPLEMENTATION_KEY, &[0u8; 20]);
+   
+   // Check if implementation address is provided in calldata (EOF-init)
+   let n = api::call_data_size() as usize;
+   if n >= 20 {
+       let mut implementation = [0u8; 20];
+       api::call_data_copy(&mut implementation, (n - 20) as u32);
+       sset(&IMPLEMENTATION_KEY, &implementation);
+   } else {
+       // Two-step init: deploy with empty implementation
+       sset(&IMPLEMENTATION_KEY, &[0u8; 20]);
+   }
 }
 
 /// initializes the controller with an implementation address
@@ -202,10 +212,22 @@ fn initialize() {
    let mut implementation = [0u8; 20];
    api::call_data_copy(&mut implementation, 16); // address at bytes 16-36
    
+   // Reject zero address
+   if implementation == [0u8; 20] {
+       api::return_value(ReturnFlags::REVERT, b"zero implementation");
+   }
+   
+   // Check if already initialized
    let mut current = [0u8; 20];
    sget(&IMPLEMENTATION_KEY, &mut current);
    if current != [0u8; 20] {
        api::return_value(ReturnFlags::REVERT, b"already initialized");
+   }
+   
+   // Check if implementation has code
+   let size = api::code_size(&implementation);
+   if size == 0 {
+       api::return_value(ReturnFlags::REVERT, b"no code at implementation");
    }
    
    sset(&IMPLEMENTATION_KEY, &implementation);
@@ -249,8 +271,29 @@ fn propose_upgrade() {
    // address is at slot #0 => bytes [16..36) after selector
    api::call_data_copy(&mut new_impl, 16);
 
+   // reject zero address
+   if new_impl == [0u8; 20] {
+       api::return_value(ReturnFlags::REVERT, b"zero implementation");
+   }
+   
+   // get current implementation
+   let mut current_impl = [0u8; 20];
+   sget(&IMPLEMENTATION_KEY, &mut current_impl);
+   
+   // reject if same as current
+   if new_impl == current_impl {
+       api::return_value(ReturnFlags::REVERT, b"same as current");
+   }
+
    let mut caller = [0u8; 20];
    api::caller(&mut caller);
+
+   // increment upgrade ID for new proposal
+   let mut upgrade_id_bytes = [0u8; 4];
+   sget(&UPGRADE_ID_KEY, &mut upgrade_id_bytes);
+   let mut upgrade_id = u32::from_le_bytes(upgrade_id_bytes);
+   upgrade_id = upgrade_id.saturating_add(1);
+   sset(&UPGRADE_ID_KEY, &upgrade_id.to_le_bytes());
 
    // reset tallies and store pending impl
    sset(&UPGRADE_YES_WEIGHT_KEY, &[0u8; 2]);
@@ -281,12 +324,20 @@ fn vote_upgrade() {
        api::return_value(ReturnFlags::REVERT, b"no pending upgrade");
    }
 
+   // get current upgrade ID
+   let mut upgrade_id_bytes = [0u8; 4];
+   sget(&UPGRADE_ID_KEY, &mut upgrade_id_bytes);
+   let upgrade_id = u32::from_le_bytes(upgrade_id_bytes);
+   if upgrade_id == 0 {
+       api::return_value(ReturnFlags::REVERT, b"no active proposal");
+   }
+
    let mut caller = [0u8; 20];
    api::caller(&mut caller);
 
-   // prevent duplicate vote
+   // prevent duplicate vote (versioned by upgrade ID)
    let mut existing_vote = [0u8; 1];
-   sget(&upgrade_vote_key(&caller), &mut existing_vote);
+   sget(&upgrade_vote_key(upgrade_id, &caller), &mut existing_vote);
    if existing_vote[0] != 0 {
        api::return_value(ReturnFlags::REVERT, b"already voted");
    }
@@ -297,7 +348,7 @@ fn vote_upgrade() {
        api::return_value(ReturnFlags::REVERT, b"not authorized");
    }
 
-   sset(&upgrade_vote_key(&caller), &[support as u8 + 1]);
+   sset(&upgrade_vote_key(upgrade_id, &caller), &[support as u8 + 1]);
 
    // update tally
    let key = if support { UPGRADE_YES_WEIGHT_KEY } else { UPGRADE_NO_WEIGHT_KEY };
@@ -334,7 +385,9 @@ fn execute_upgrade() {
    let no = u16::from_le_bytes(no_bytes);
 
    let total = yes + no;
-   if total == 0 || (yes * 3) < (total * 2) {
+   // use ceiling division: (total * 2 + 2) / 3
+   let threshold = (total * 2 + 2) / 3;
+   if total == 0 || yes < threshold {
        api::return_value(ReturnFlags::REVERT, b"need 2/3 majority");
    }
 
@@ -354,7 +407,15 @@ fn execute_upgrade() {
        sset(&UPGRADE_YES_WEIGHT_KEY, &[0u8; 2]);
        sset(&UPGRADE_NO_WEIGHT_KEY, &[0u8; 2]);
        emit_upgrade_executed(&old_impl, &pending);
-       api::return_value(ReturnFlags::empty(), &[1u8]);
+       
+       // get current upgrade ID to return
+       let mut upgrade_id_bytes = [0u8; 4];
+       sget(&UPGRADE_ID_KEY, &mut upgrade_id_bytes);
+       let upgrade_id = u32::from_le_bytes(upgrade_id_bytes);
+       
+       let mut out = [0u8; 32];
+       out[28..32].copy_from_slice(&upgrade_id.to_be_bytes());
+       api::return_value(ReturnFlags::empty(), &out);
    }
 
    let mut ts = [0u8; 8];
@@ -367,8 +428,8 @@ fn execute_upgrade() {
    lo.copy_from_slice(&now32[..8]);
    let now = u64::from_le_bytes(lo);
 
-   // 48h delay
-   if now < proposed.saturating_add(172_800) {
+   // 48h delay (28800*6s blocks)
+   if now < proposed.saturating_add(28_800) {
        api::return_value(ReturnFlags::REVERT, b"48h delay required");
    }
 
@@ -378,7 +439,15 @@ fn execute_upgrade() {
    sset(&UPGRADE_NO_WEIGHT_KEY, &[0u8; 2]);
 
    emit_upgrade_executed(&old_impl, &pending);
-   api::return_value(ReturnFlags::empty(), &[1u8]);
+   
+   // get current upgrade ID to return
+   let mut upgrade_id_bytes = [0u8; 4];
+   sget(&UPGRADE_ID_KEY, &mut upgrade_id_bytes);
+   let upgrade_id = u32::from_le_bytes(upgrade_id_bytes);
+   
+   let mut out = [0u8; 32];
+   out[28..32].copy_from_slice(&upgrade_id.to_be_bytes());
+   api::return_value(ReturnFlags::empty(), &out);
 }
 
 /// permanently removes the templar privilege
@@ -452,10 +521,16 @@ fn delegate_to_implementation() {
    let mut out_buf = [0u8; MAX_DATA];
    let mut out = &mut out_buf[..];
 
+   // guard against zero gas
+   let gas_limit = api::gas_limit();
+   if gas_limit == 0 {
+       api::return_value(ReturnFlags::REVERT, b"zero gas limit");
+   }
+
    match api::delegate_call(
        CallFlags::empty(),
        &implementation,
-       api::gas_limit() * 9 / 10,
+       gas_limit * 9 / 10,
        0,
        &[0u8; 32],
        data,

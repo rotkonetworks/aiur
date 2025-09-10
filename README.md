@@ -46,13 +46,48 @@ make build
 
 ## deployment
 
+the system supports two deployment flows:
+
+### two-step initialization
+deploy contracts with initial funding, then initialize separately:
+
 ```bash
-# deploy implementation first
-IMPL_ADDR=$(cast send --create "$(xxd -p -c 99999 implementation.polkavm)" \
+# deploy with funding (1 ETH default, adjustable via CREATE_VALUE)
+make deploy CREATE_VALUE=1000000000000000000
+
+# bootstrap the system (set deployer as initial templar)
+make bootstrap
+```
+
+### eof-init (single step)
+append implementation address to controller bytecode for atomic deployment:
+
+```bash
+# deploy and initialize in one transaction
+make deploy-eof CREATE_VALUE=1000000000000000000
+```
+
+both methods:
+- fund contracts with value to prevent storage write traps
+- set deployer as templar with emergency upgrade powers
+- templar can be permanently removed via `removeTemplar()`
+
+### manual deployment
+
+```bash
+# deploy implementation first (with funding)
+IMPL_ADDR=$(cast send --create --value 1ether \
+  "0x$(xxd -p -c 99999 implementation.polkavm)" \
   --account dev --json | jq -r .contractAddress)
 
-# deploy controller with implementation address
-CTRL_ADDR=$(cast send --create \
+# two-step: deploy controller, then initialize
+CTRL_ADDR=$(cast send --create --value 1ether \
+  "0x$(xxd -p -c 99999 controller.polkavm)" \
+  --account dev --json | jq -r .contractAddress)
+cast send $CTRL_ADDR "initialize(address)" $IMPL_ADDR
+
+# eof-init: append implementation address to bytecode
+CTRL_ADDR=$(cast send --create --value 1ether \
   "0x$(xxd -p -c 99999 controller.polkavm)$(echo $IMPL_ADDR | cut -c3-)" \
   --account dev --json | jq -r .contractAddress)
 

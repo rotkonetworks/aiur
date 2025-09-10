@@ -656,7 +656,9 @@ fn execute_proposal() {
     let no = u16::from_le_bytes(no_bytes);
 
     let total = yes + no;
-    if total == 0 || (yes * 3) < (total * 2) {
+    // use ceiling division: (total * 2 + 2) / 3
+    let threshold = (total * 2 + 2) / 3;
+    if total == 0 || yes < threshold {
         api::return_value(ReturnFlags::REVERT, b"need 2/3 majority");
     }
 
@@ -675,7 +677,11 @@ fn execute_proposal() {
 
     // mark executed
     sset(&proposal_executed_key(proposal_id), &[1u8]);
-    api::return_value(ReturnFlags::empty(), &[]);
+    
+    // return proposal ID for monitoring
+    let mut out = [0u8; 32];
+    out[28..32].copy_from_slice(&proposal_id.to_be_bytes());
+    api::return_value(ReturnFlags::empty(), &out);
 }
 
 /// applies a pylon level change decided by governance
@@ -907,6 +913,11 @@ fn report_probe_data() {
     report_hash.copy_from_slice(&input[36..68]); // slot 1
     
     let status_code = input[95]; // slot 2
+    
+    // reject 255 sentinel value
+    if status_code == 255 {
+        api::return_value(ReturnFlags::REVERT, b"invalid status 255");
+    }
 
     let mut caller = [0u8; 20];
     api::caller(&mut caller);
