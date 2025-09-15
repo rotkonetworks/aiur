@@ -2,3 +2,4 @@
 /*.polkavm
 uapi
 all
+.env
