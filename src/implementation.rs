@@ -1022,6 +1022,7 @@ fn finalize_window() {
     }
 
     // 2/3 consensus for status determination
+    #[allow(clippy::manual_div_ceil)]
     let consensus_threshold = (total_count * 2 + 2) / 3;
     
     let status = if healthy_count >= consensus_threshold {
