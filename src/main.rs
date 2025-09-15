@@ -184,47 +184,32 @@ fn emit_templar_removed(templar: &[u8; 20]) {
 #[no_mangle]
 #[polkavm_derive::polkavm_export]
 pub extern "C" fn deploy() {
-    let mut deployer = [0u8; 20];
-    api::caller(&mut deployer);
-    sset(&TEMPLAR_KEY, &deployer);
-
-    // check if implementation address is provided in calldata (EOF-init)
     let n = api::call_data_size() as usize;
-    if n >= 20 {
-        let mut implementation = [0u8; 20];
-        api::call_data_copy(&mut implementation, (n - 20) as u32);
-        sset(&IMPLEMENTATION_KEY, &implementation);
-    } else {
-        // two-step init: deploy with empty implementation
-        sset(&IMPLEMENTATION_KEY, &[0u8; 20]);
+    if n < 20 {
+        // cannot deploy without implementation
+        api::return_value(ReturnFlags::REVERT, b"missing implementation");
     }
-}
 
-/// initializes the controller with an implementation address
-fn initialize() {
     let mut implementation = [0u8; 20];
-    api::call_data_copy(&mut implementation, 16); // address at bytes 16-36
+    api::call_data_copy(&mut implementation, (n - 20) as u32);
 
     // reject zero address
     if implementation == [0u8; 20] {
         api::return_value(ReturnFlags::REVERT, b"zero implementation");
     }
 
-    // check if already initialized
-    let mut current = [0u8; 20];
-    sget(&IMPLEMENTATION_KEY, &mut current);
-    if current != [0u8; 20] {
-        api::return_value(ReturnFlags::REVERT, b"already initialized");
-    }
-
-    // check if implementation has code
+    // check implementation has code
     let size = api::code_size(&implementation);
     if size == 0 {
         api::return_value(ReturnFlags::REVERT, b"no code at implementation");
     }
 
+    // set implementation 
     sset(&IMPLEMENTATION_KEY, &implementation);
-    api::return_value(ReturnFlags::empty(), &[]);
+    // set deployer as templar
+    let mut deployer = [0u8; 20];
+    api::caller(&mut deployer);
+    sset(&TEMPLAR_KEY, &deployer);
 }
 
 /// routes calls to proxy functions or delegates to implementation
@@ -235,7 +220,6 @@ pub extern "C" fn call() {
     api::call_data_copy(&mut selector, 0);
 
     // compute proxy selectors on the fly to avoid accidental collisions
-    let s_initialize = sel("initialize(address)");
     let s_propose_upgrade = sel("proposeUpgrade(address)");
     let s_vote_upgrade = sel("voteUpgrade(bool)");
     let s_execute_upgrade = sel("executeUpgrade()");
@@ -244,7 +228,6 @@ pub extern "C" fn call() {
     let s_remove_templar = sel("removeTemplar()");
 
     match selector {
-        x if x == s_initialize => initialize(),
         x if x == s_propose_upgrade => propose_upgrade(),
         x if x == s_vote_upgrade => vote_upgrade(),
         x if x == s_execute_upgrade => execute_upgrade(),
