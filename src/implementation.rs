@@ -1022,7 +1022,7 @@ fn finalize_window() {
     }
 
     // 2/3 consensus for status determination
-    let consensus_threshold = (total_count * 2) / 3;
+    let consensus_threshold = (total_count * 2 + 2) / 3;
     
     let status = if healthy_count >= consensus_threshold {
         0u8 // healthy
