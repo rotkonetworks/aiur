@@ -75,6 +75,73 @@ fn sset(key: &[u8], value: &[u8]) {
 }
 #[inline(always)]
 fn sget(key: &[u8], out: &mut [u8]) {
+
+// ---- event emission helpers ----
+
+fn emit_network_created(network_id: u32, creator: &[u8; 20], level: u8) {
+    let mut topic0 = [0u8; 32];
+    api::hash_keccak_256(b"NetworkCreated(uint32,address,uint8)", &mut topic0);
+    let mut topic1 = [0u8; 32];
+    topic1[28..32].copy_from_slice(&network_id.to_be_bytes());
+    let mut topic2 = [0u8; 32];
+    topic2[12..32].copy_from_slice(creator);
+    let mut data = [0u8; 32];
+    data[31] = level;
+    let topics = [topic0, topic1, topic2];
+    api::deposit_event(&topics, &data);
+}
+
+fn emit_proposal_created(proposal_id: u32, proposer: &[u8; 20], ptype: u8) {
+    let mut topic0 = [0u8; 32];
+    api::hash_keccak_256(b"ProposalCreated(uint32,address,uint8)", &mut topic0);
+    let mut topic1 = [0u8; 32];
+    topic1[28..32].copy_from_slice(&proposal_id.to_be_bytes());
+    let mut topic2 = [0u8; 32];
+    topic2[12..32].copy_from_slice(proposer);
+    let mut data = [0u8; 32];
+    data[31] = ptype;
+    let topics = [topic0, topic1, topic2];
+    api::deposit_event(&topics, &data);
+}
+
+fn emit_proposal_voted(proposal_id: u32, voter: &[u8; 20], support: bool, weight: u8) {
+    let mut topic0 = [0u8; 32];
+    api::hash_keccak_256(b"ProposalVoted(uint32,address,bool,uint16)", &mut topic0);
+    let mut topic1 = [0u8; 32];
+    topic1[28..32].copy_from_slice(&proposal_id.to_be_bytes());
+    let mut topic2 = [0u8; 32];
+    topic2[12..32].copy_from_slice(voter);
+    let mut data = [0u8; 64];
+    data[31] = support as u8;
+    data[62..64].copy_from_slice(&(weight as u16).to_be_bytes());
+    let topics = [topic0, topic1, topic2];
+    api::deposit_event(&topics, &data);
+}
+
+fn emit_proposal_executed(proposal_id: u32, executor: &[u8; 20]) {
+    let mut topic0 = [0u8; 32];
+    api::hash_keccak_256(b"ProposalExecuted(uint32,address)", &mut topic0);
+    let mut topic1 = [0u8; 32];
+    topic1[28..32].copy_from_slice(&proposal_id.to_be_bytes());
+    let mut topic2 = [0u8; 32];
+    topic2[12..32].copy_from_slice(executor);
+    let topics = [topic0, topic1, topic2];
+    api::deposit_event(&topics, &[]);
+}
+
+fn emit_window_finalized(pylon: &[u8; 20], window: u32, status: u8, total: u8) {
+    let mut topic0 = [0u8; 32];
+    api::hash_keccak_256(b"WindowFinalized(address,uint32,uint8,uint8)", &mut topic0);
+    let mut topic1 = [0u8; 32];
+    topic1[12..32].copy_from_slice(pylon);
+    let mut topic2 = [0u8; 32];
+    topic2[28..32].copy_from_slice(&window.to_be_bytes());
+    let mut data = [0u8; 64];
+    data[31] = status;
+    data[63] = total;
+    let topics = [topic0, topic1, topic2];
+    api::deposit_event(&topics, &data);
+}
     let mut slice = &mut out[..];
     let _ = api::get_storage(StorageFlags::empty(), key, &mut slice);
 }
@@ -390,6 +457,8 @@ fn create_network() {
     sset(&network_key(network_id), &level);
     sset(&pylon_key(network_id, &caller), &[1u8]); // mark as member
 
+    emit_network_created(network_id, &caller, level[0]);
+
     let mut out = [0u8; 32];
     out[28..32].copy_from_slice(&network_id.to_be_bytes());
     api::return_value(ReturnFlags::empty(), &out);
@@ -584,6 +653,8 @@ fn create_proposal(proposal_type: u8, target: &[u8; 20], value: u8) {
 
     sset(&PROPOSAL_COUNT_KEY, &count.to_le_bytes());
 
+    emit_proposal_created(count, &caller, proposal_type);
+
     let mut out = [0u8; 32];
     out[28..32].copy_from_slice(&count.to_be_bytes());
     api::return_value(ReturnFlags::empty(), &out);
@@ -627,6 +698,8 @@ fn vote() {
     let mut tally = u16::from_le_bytes(tall);
     tally = tally.saturating_add(weight as u16);
     sset(&vote_weight_key(proposal_id, support), &tally.to_le_bytes());
+
+    emit_proposal_voted(proposal_id, &voter, support, weight);
 
     let mut out = [0u8; 32];
     out[30..32].copy_from_slice(&tally.to_le_bytes());
@@ -676,6 +749,10 @@ fn execute_proposal() {
     }
 
     // mark executed
+    let mut caller = [0u8; 20];
+    api::caller(&mut caller);
+    emit_proposal_executed(proposal_id, &caller);
+
     sset(&proposal_executed_key(proposal_id), &[1u8]);
     
     // return proposal ID for monitoring
@@ -1016,6 +1093,8 @@ fn finalize_window() {
     if total_count < MIN_PROBES_FOR_CONSENSUS {
         sset(&pylon_status_key(&pylon), &[2u8]); // insufficient data
         sset(&window_finalized_key(&pylon, window), &[1u8]);
+
+    emit_window_finalized(&pylon, window, status, total_count);
         let mut out = [0u8; 32];
         out[31] = 2;
         api::return_value(ReturnFlags::empty(), &out);
@@ -1046,6 +1125,8 @@ fn finalize_window() {
     sset(&pylon_metrics_key(&pylon), &metrics);          // store metrics
     sset(&probe_window_key(&pylon, window), &[0u8; 4]);  // clear accumulator
     sset(&window_finalized_key(&pylon, window), &[1u8]); // mark finalized
+
+    emit_window_finalized(&pylon, window, status, total_count);
 
     let mut out = [0u8; 32];
     out[31] = status;
