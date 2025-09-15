@@ -1,190 +1,120 @@
 # aiur
 
-aiur is a smart contract system for the Infrastructure Builders' Program (IBP)
-that handles network governance, member management and decentralized monitoring
-with on-chain verified SLA tracking.
-
-## overview
-
-the system consists of two contracts:
-- **controller (proxy)**: handles upgrades and delegation
-- **implementation**: core logic for IBP operations
-
-### key feats
-
-- **network management**: create and manage multiple networks with different level requirements
-- **member governance**: democratic voting for level changes, org assignments, and DNS control
-- **decentralized monitoring**: whitelisted probes report pylon health with hash-based verification
-- **SLA tracking**: onchain consensus for payment eligibility based on uptime
+smart contract system for the Infrastructure Builders' Program (IBP) - handles
+network governance, member management, and decentralized monitoring with
+on-chain SLA tracking.
 
 ## architecture
 
-### storage layout
-- shared prefix `0x10` for pylon levels (accessible by both contracts)
-- implementation uses `0x20-0x40` for its storage
-- controller uses `0xA1-0xA7` for upgrade management
+- **controller**: upgradeable proxy, handles delegation and upgrade governance
+- **implementation**: core IBP logic - networks, pylons, proposals, monitoring
 
-### monitoring system
-- probes report every 5 minutes (300 seconds)
-- each report contains: 32-byte IPFS hash + 1-byte status code
-- status codes: 0-127 (healthy), 128-255 (degraded/error)
-- 2/3 consensus required for window finalization
+deployed atomically with implementation address appended to controller bytecode.
+no separate initialization step.
 
-## building
+## storage layout
 
-```bash
-# install dependencies
-cargo install polkatool
-
-# build contracts
-make build
-
-# output files:
-# - controller.polkavm
-# - implementation.polkavm
+```
+0x10: pylon levels (shared)
+0x20-0x40: implementation storage
+0xA1-0xA8: controller storage (upgrades)
 ```
 
 ## deployment
 
-the system supports two deployment flows:
-
-### two-step initialization
-deploy contracts with initial funding, then initialize separately:
-
 ```bash
-# deploy with funding (1 ETH default, adjustable via CREATE_VALUE)
-make deploy CREATE_VALUE=1000000000000000000
+# build
+make build
 
-# bootstrap the system (set deployer as initial templar)
+# deploy both contracts
+make deploy
+
+# set deployer as level 5
 make bootstrap
 ```
 
-### eof-init (single step)
-append implementation address to controller bytecode for atomic deployment:
+contracts require funding (1 NATIVE_TOKEN default) to prevent storage write traps.
 
+## core operations
+
+### networks
 ```bash
-# deploy and initialize in one transaction
-make deploy-eof CREATE_VALUE=1000000000000000000
-```
-
-both methods:
-- fund contracts with value to prevent storage write traps
-- set deployer as templar with emergency upgrade powers
-- templar can be permanently removed via `removeTemplar()`
-
-### manual deployment
-
-```bash
-# deploy implementation first (with funding)
-IMPL_ADDR=$(cast send --create --value 1ether \
-  "0x$(xxd -p -c 99999 implementation.polkavm)" \
-  --account dev --json | jq -r .contractAddress)
-
-# two-step: deploy controller, then initialize
-CTRL_ADDR=$(cast send --create --value 1ether \
-  "0x$(xxd -p -c 99999 controller.polkavm)" \
-  --account dev --json | jq -r .contractAddress)
-cast send $CTRL_ADDR "initialize(address)" $IMPL_ADDR
-
-# eof-init: append implementation address to bytecode
-CTRL_ADDR=$(cast send --create --value 1ether \
-  "0x$(xxd -p -c 99999 controller.polkavm)$(echo $IMPL_ADDR | cut -c3-)" \
-  --account dev --json | jq -r .contractAddress)
-
-# all interactions go through the controller
-export CONTRACT=$CTRL_ADDR
-```
-
-## usage
-
-### network operations
-
-```bash
-# create a network (requires level 5+)
-cast send $CONTRACT "createNetwork()"
+# create network (level 5+ required)
+make create-network
 
 # add pylon to network
-cast send $CONTRACT "addPylon(uint32,address)" 1 0xPYLON_ADDRESS
+make add-pylon NETWORK_ID=1 PYLON_ADDRESS=0x...
 
-# set DNS for network
-cast send $CONTRACT "setNetworkDns(uint32,uint8,bool)" 1 1 true
+# configure DNS
+make set-network-dns NETWORK_ID=1 ORG_ID=1 ENABLED=true
 ```
 
 ### governance
-
 ```bash
-# propose level change (creates proposal)
-cast send $CONTRACT "setPylonLevel(address,uint8)" 0xPYLON 6
+# propose changes (level 5+)
+make propose-pylon-level PYLON_ADDRESS=0x... LEVEL=6
+make whitelist-probe PROBE_ADDRESS=0x...
 
-# vote on proposal
-cast send $CONTRACT "vote(uint32,bool)" 1 true
+# vote (level 5-7, equal weight)
+make vote PROPOSAL_ID=1 SUPPORT=true
 
-# execute proposal (requires 2/3 majority)
-cast send $CONTRACT "executeProposal(uint32)" 1
+# execute (2/3 majority required)
+make execute-proposal PROPOSAL_ID=1
 ```
 
 ### monitoring
-
 ```bash
-# whitelist probe (via governance)
-cast send $CONTRACT "whitelistProbe(address)" 0xPROBE
+# probe reports (every 5 min)
+make report-probe PYLON_ADDRESS=0x... REPORT_HASH=0x... STATUS_CODE=0
 
-# report monitoring data (probe only)
-# statusCode: 0-127 healthy, 128-255 error
-cast send $CONTRACT "reportProbeData(address,bytes32,uint8)" \
-  0xPYLON 0xIPFS_HASH 0
-
-# finalize window (anyone can call after window ends)
-cast send $CONTRACT "finalizeWindow(address,uint32)" 0xPYLON 12345
+# finalize window (requires 3+ reports)
+make finalize-window PYLON_ADDRESS=0x... WINDOW=12345
 ```
 
-### queries
+status codes:
+- 0-127: healthy
+- 128-199: degraded  
+- 200-254: error states
+- 255: reserved (rejected)
 
+### upgrades
 ```bash
-# get pylon level
-cast call $CONTRACT "getPylonLevel(address)" 0xPYLON
+# propose new implementation
+make propose-upgrade NEW_IMPL_ADDRESS=0x...
 
-# get pylon status (0=healthy, 1=degraded, 2=insufficient, 128+=error)
-cast call $CONTRACT "getPylonStatus(address)" 0xPYLON
+# vote
+make vote-upgrade SUPPORT=true
 
-# get network info
-cast call $CONTRACT "getNetworkInfo(uint32)" 1
+# execute (48h timelock, templar can bypass)
+make execute-upgrade
+
+# remove templar privilege
+make remove-templar
 ```
 
-## contract upgrades
+## query functions
 
 ```bash
-# deploy new implementation
-NEW_IMPL=$(cast send --create "$(xxd -p -c 99999 new_impl.polkavm)" \
-  --json | jq -r .contractAddress)
-
-# propose upgrade (any level 5+)
-cast send $CONTRACT "proposeUpgrade(address)" $NEW_IMPL
-
-# vote on upgrade
-cast send $CONTRACT "voteUpgrade(bool)" true
-
-# execute upgrade (48h timelock unless templar)
-cast send $CONTRACT "executeUpgrade()"
+make get-implementation
+make get-pylon-level PYLON_ADDRESS=0x...
+make get-pylon-status PYLON_ADDRESS=0x...
+make get-network-info NETWORK_ID=1
 ```
 
-## status code reference
+## consensus math
 
-| range | meaning | description |
-|-------|---------|-------------|
-| 0-127 | healthy | node operational, can encode latency |
-| 128-199 | degraded | partially functional |
-| 200 | offline | node unreachable |
-| 201 | wrong chain | incorrect network |
-| 202 | not synced | node syncing |
-| 203 | no peers | insufficient connectivity |
+uses ceiling division for 2/3 majority: `(total * 2 + 2) / 3`
+- 3 votes → need 2
+- 4 votes → need 3
+- 5 votes → need 4
 
 ## security
 
-- upgrades require 2/3 majority vote from level 5+ pylons
-- 48-hour timelock on upgrades (templar can bypass once)
-- collision-resistant storage keys using keccak256
-- one report per probe per window enforcement
+- collision-resistant storage keys via keccak256
+- one report per probe per window
+- versioned voting keys prevent cross-proposal replay
+- zero address and code size validation
+- 48h upgrade timelock (except templar)
 
 ## license
 
