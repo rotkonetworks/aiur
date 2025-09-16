@@ -1,6 +1,4 @@
 # IBP Contracts Makefile
-# Set default CREATE_VALUE for funding contracts (in wei)
-CREATE_VALUE ?= 1000000000000000000  # 1 ETH default
 
 -include .env
 export
@@ -25,10 +23,10 @@ deploy: build
 	@test -n "$(CHAIN_RPC)" || (echo "Set CHAIN_RPC in .env" && exit 1)
 	@test -n "$(PRIVATE_KEY)" || (echo "Set PRIVATE_KEY in .env" && exit 1)
 	
-	@echo "Deploying to $(CHAIN_RPC) with value $(CREATE_VALUE) wei..."
+	@echo "Deploying to $(CHAIN_RPC)..."
 	@echo "Deploying implementation first..."
 	$(eval IMPL_ADDR := $(shell cast send --private-key $(PRIVATE_KEY) \
-		--rpc-url $(CHAIN_RPC) --create --value $(CREATE_VALUE) \
+		--rpc-url $(CHAIN_RPC) --create \
 		"0x$$(xxd -p -c 99999 implementation.polkavm)" \
 		--json | jq -r .contractAddress))
 	@echo "Implementation deployed at: $(IMPL_ADDR)"
@@ -36,7 +34,7 @@ deploy: build
 	@echo "Deploying controller with implementation address appended..."
 	$(eval IMPL_BYTES := $(shell echo $(IMPL_ADDR) | sed 's/0x//'))
 	$(eval CTRL_ADDR := $(shell cast send --private-key $(PRIVATE_KEY) \
-		--rpc-url $(CHAIN_RPC) --create --value $(CREATE_VALUE) \
+		--rpc-url $(CHAIN_RPC) --create \
 		"0x$$(xxd -p -c 99999 controller.polkavm)$$(echo $(IMPL_BYTES))" \
 		--json | jq -r .contractAddress))
 	@echo "Controller deployed at: $(CTRL_ADDR)"
@@ -198,7 +196,7 @@ monitor:
 	@test -n "$(CONTROLLER_ADDRESS)" || (echo "Set CONTROLLER_ADDRESS" && exit 1)
 	@echo "Monitoring $(CONTROLLER_ADDRESS)..."
 	@while true; do \
-		echo "=== $(date) ==="; \
+		echo "=== $$(date) ==="; \
 		echo "Implementation: $$(cast call $(CONTROLLER_ADDRESS) 'getImplementation()' --rpc-url $(CHAIN_RPC))"; \
 		echo "Pending upgrade: $$(cast call $(CONTROLLER_ADDRESS) 'getPendingUpgrade()' --rpc-url $(CHAIN_RPC))"; \
 		echo "Network count: $$(cast call $(CONTROLLER_ADDRESS) 'getNetworkCount()' --rpc-url $(CHAIN_RPC))"; \
@@ -209,7 +207,7 @@ help:
 	@echo "IBP Contracts Management"
 	@echo ""
 	@echo "DEPLOYMENT:"
-	@echo "  make deploy                        - Deploy contracts with implementation"
+	@echo "  make deploy                        - Deploy contracts"
 	@echo "  make bootstrap                     - Set deployer as level 5"
 	@echo ""
 	@echo "NETWORK MANAGEMENT:"
