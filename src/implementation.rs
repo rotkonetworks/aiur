@@ -75,8 +75,11 @@ fn sset(key: &[u8], value: &[u8]) {
 }
 #[inline(always)]
 fn sget(key: &[u8], out: &mut [u8]) {
+    let mut slice = &mut out[..];
+    let _ = api::get_storage(StorageFlags::empty(), key, &mut slice);
+}
 
-// ---- event emission helpers ----
+// event emission helpers
 
 fn emit_network_created(network_id: u32, creator: &[u8; 20], level: u8) {
     let mut topic0 = [0u8; 32];
@@ -141,9 +144,6 @@ fn emit_window_finalized(pylon: &[u8; 20], window: u32, status: u8, total: u8) {
     data[63] = total;
     let topics = [topic0, topic1, topic2];
     api::deposit_event(&topics, &data);
-}
-    let mut slice = &mut out[..];
-    let _ = api::get_storage(StorageFlags::empty(), key, &mut slice);
 }
 
 // ---- selectors ----
@@ -423,13 +423,13 @@ pub extern "C" fn call() {
 fn bootstrap() {
     let mut caller = [0u8; 20];
     api::caller(&mut caller);
-    
+
     let mut level = [0u8; 1];
     sget(&pylon_level_key(&caller), &mut level);
     if level[0] != 0 {
         api::return_value(ReturnFlags::REVERT, b"already bootstrapped");
     }
-    
+
     sset(&pylon_level_key(&caller), &[5u8]);
     api::return_value(ReturnFlags::empty(), &[]);
 }
@@ -754,7 +754,7 @@ fn execute_proposal() {
     emit_proposal_executed(proposal_id, &caller);
 
     sset(&proposal_executed_key(proposal_id), &[1u8]);
-    
+
     // return proposal ID for monitoring
     let mut out = [0u8; 32];
     out[28..32].copy_from_slice(&proposal_id.to_be_bytes());
@@ -985,12 +985,12 @@ fn report_probe_data() {
 
     let mut pylon = [0u8; 20];
     pylon.copy_from_slice(&input[12..32]);
-    
+
     let mut report_hash = [0u8; 32];
     report_hash.copy_from_slice(&input[36..68]); // slot 1
-    
+
     let status_code = input[95]; // slot 2
-    
+
     // reject 255 sentinel value
     if status_code == 255 {
         api::return_value(ReturnFlags::REVERT, b"invalid status 255");
@@ -1024,7 +1024,7 @@ fn report_probe_data() {
     if reported[0] != 0 {
         api::return_value(ReturnFlags::REVERT, b"already reported");
     }
-    
+
     // store hash and status (33 bytes total)
     let mut report_data = [0u8; 33];
     report_data[0..32].copy_from_slice(&report_hash);
@@ -1036,7 +1036,7 @@ fn report_probe_data() {
     sget(&probe_window_key(&pylon, window), &mut wdata);
 
     wdata[0] = wdata[0].saturating_add(1); // total count
-    
+
     if status_code < 128 {
         wdata[1] = wdata[1].saturating_add(1); // healthy count
     } else if status_code < 200 {
@@ -1044,7 +1044,7 @@ fn report_probe_data() {
     } else {
         wdata[3] = wdata[3].saturating_add(1); // error count
     }
-    
+
     sset(&probe_window_key(&pylon, window), &wdata);
 
     let mut out = [0u8; 32];
@@ -1094,7 +1094,7 @@ fn finalize_window() {
         sset(&pylon_status_key(&pylon), &[2u8]); // insufficient data
         sset(&window_finalized_key(&pylon, window), &[1u8]);
 
-    emit_window_finalized(&pylon, window, status, total_count);
+        emit_window_finalized(&pylon, window, 2, total_count);
         let mut out = [0u8; 32];
         out[31] = 2;
         api::return_value(ReturnFlags::empty(), &out);
@@ -1103,7 +1103,7 @@ fn finalize_window() {
     // 2/3 consensus for status determination
     #[allow(clippy::manual_div_ceil)]
     let consensus_threshold = (total_count * 2 + 2) / 3;
-    
+
     let status = if healthy_count >= consensus_threshold {
         0u8 // healthy
     } else if (healthy_count + degraded_count) >= consensus_threshold {
@@ -1121,7 +1121,7 @@ fn finalize_window() {
     metrics[2] = healthy_count;
     metrics[3] = degraded_count;
     metrics[4..8].copy_from_slice(&window.to_le_bytes());
-    
+
     sset(&pylon_metrics_key(&pylon), &metrics);          // store metrics
     sset(&probe_window_key(&pylon, window), &[0u8; 4]);  // clear accumulator
     sset(&window_finalized_key(&pylon, window), &[1u8]); // mark finalized
