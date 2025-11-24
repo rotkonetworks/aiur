@@ -1,4 +1,5 @@
 # aiur
+decentralized oracle for network liveness
 
 smart contract system for the Infrastructure Builders' Program (IBP) - handles
 network governance, member management, and decentralized monitoring with
